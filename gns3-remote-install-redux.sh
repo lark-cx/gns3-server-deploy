@@ -23,10 +23,6 @@
 #   --custom-repository REPO  Use a custom GNS3 PPA name
 #   -h, --help                Show this help
 
-# ─── Strict mode (after arg parsing, before any real work) ────────────────────
-# We delay `set -euo pipefail` until after option parsing so getopt failures
-# don't kill the script before we can print help.
-
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 readonly DOCKER_BASE_URL="https://download.docker.com/linux/ubuntu"
@@ -35,6 +31,7 @@ readonly GNS3_USER="gns3"
 readonly GNS3_HOME="/opt/gns3"
 readonly GNS3_CONF_DIR="/etc/gns3"
 readonly GNS3_SERVICE_FILE="/lib/systemd/system/gns3.service"
+readonly GNS3_VENV="/usr/share/gns3/gns3-server"
 readonly CONFIG_SERVE_PORT=8003
 readonly CONFIG_SERVE_DIR="/var/lib/gns3-config-serve"
 readonly CONFIG_SERVE_HOURS=2
@@ -56,9 +53,12 @@ log_warn()  { printf "${YELLOW}[WARN]${NC}  %s\n" "$1" >&2; }
 log_error() { printf "${RED}[FAIL]${NC}  %s\n" "$1" >&2; }
 log_fatal() { printf "${RED}[FATAL]${NC} %s\n" "$1" >&2; exit 1; }
 
+# Testability wrapper — EUID is readonly in bash, so tests override this function
+is_root() { [[ "$EUID" -eq 0 ]]; }
+
 # ─── Mutable arrays (built up by option flags) ───────────────────────────────
 
-REQUIRED_CMDS=(apt apt-add-repository dpkg curl chown chmod useradd usermod lsmod systemctl ss openssl)
+REQUIRED_CMDS=(apt apt-add-repository dpkg chown chmod useradd usermod lsmod systemctl ss openssl)
 REQUIRED_PORTS=(3080)
 REQUIRED_GROUPS=(kvm ubridge)
 REQUIRED_MODS=(kvm)
@@ -68,13 +68,12 @@ REQUIRED_PKGS=(
   ca-certificates
   curl
   gns3-server
-  dynagen
   dynamips
   vpcs
   python3
   python3-pip
   python3-setuptools
-  qemu-kvm
+  qemu-system-x86
   qemu-utils
 )
 
@@ -140,51 +139,44 @@ done
 
 # ─── Roll up arrays based on flags ───────────────────────────────────────────
 
-if [[ "$WITH_OPENVPN" -eq 1 ]]; then
+if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
   REQUIRED_PORTS+=(1194)
   REQUIRED_PKGS+=("${PKGS_OPENVPN[@]}")
 fi
 
-if [[ "$WITH_WIREGUARD" -eq 1 ]]; then
+if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
   REQUIRED_PORTS+=(51820)
   REQUIRED_MODS+=(wireguard)
   REQUIRED_PKGS+=("${PKGS_WIREGUARD[@]}")
 fi
 
 # Ephemeral config server needed if any VPN is enabled
-if [[ "$WITH_OPENVPN" -eq 1 || "$WITH_WIREGUARD" -eq 1 ]]; then
-  REQUIRED_PORTS+=("$CONFIG_SERVE_PORT")
+if [[ "${WITH_OPENVPN}" -eq 1 || "${WITH_WIREGUARD}" -eq 1 ]]; then
+  REQUIRED_PORTS+=("${CONFIG_SERVE_PORT}")
 fi
 
-if [[ "$WITH_DOCKER" -eq 1 ]]; then
+if [[ "${WITH_DOCKER}" -eq 1 ]]; then
   REQUIRED_PKGS+=("${PKGS_DOCKER[@]}")
   REQUIRED_GROUPS+=(docker)
 fi
 
-if [[ "$WITH_WELCOME" -eq 1 ]]; then
+if [[ "${WITH_WELCOME}" -eq 1 ]]; then
   REQUIRED_PKGS+=("${PKGS_WELCOME[@]}")
 fi
-
-# ─── Strict mode ON ──────────────────────────────────────────────────────────
-
-set -euo pipefail
-trap 'log_error "Script failed at line $LINENO. Partial install may need cleanup."' ERR
 
 # ─── Preflight checks ────────────────────────────────────────────────────────
 
 preflight_checks() {
   local has_errors=0
 
-  # Hard stops — wrong OS or not root makes everything else meaningless
-  if [[ "$EUID" -ne 0 ]]; then
+  if ! is_root; then
     log_fatal "Must run as root. Try: sudo $0"
   fi
 
-  if [[ ! "$OSTYPE" == linux-gnu* ]]; then
+  if [[ ! "${OSTYPE}" == linux-gnu* ]]; then
     log_fatal "This script requires Linux (detected: $OSTYPE)."
   fi
 
-  # Source os-release early — we need it for the Ubuntu check and later for codename
   if [[ -f /etc/os-release ]]; then
     source /etc/os-release
   else
@@ -195,7 +187,6 @@ preflight_checks() {
     log_fatal "This script requires Ubuntu (detected: ${ID:-unknown})."
   fi
 
-  # Collect all remaining issues so the user gets them in one shot
   local missing_cmds=()
   for cmd in "${REQUIRED_CMDS[@]}"; do
     command -v "$cmd" &>/dev/null || missing_cmds+=("$cmd")
@@ -221,14 +212,16 @@ preflight_checks() {
     lsmod | grep -wq "$mod" 2>/dev/null || missing_mods+=("$mod")
   done
   if [[ ${#missing_mods[@]} -gt 0 ]]; then
-    log_warn "Kernel module(s) not loaded: ${missing_mods[*]}  (may load on demand)"
+    log_warn "Kernel module(s) not loaded: ${missing_mods[*]}"
+    log_warn "  To load now:        modprobe ${missing_mods[*]}"
+    log_warn "  To persist on boot: echo '${missing_mods[*]}' >> /etc/modules-load.d/gns3.conf"
   fi
 
-  if [[ "$DISABLE_KVM" -eq 0 ]] && [[ $(grep -Ec '(vmx|svm)' /proc/cpuinfo) -eq 0 ]]; then
+  if [[ "${DISABLE_KVM}" -eq 0 ]] && [[ $(grep -Ec '(vmx|svm)' /proc/cpuinfo) -eq 0 ]]; then
     log_warn "CPU virtualization extensions not detected. Pass --without-kvm if intentional."
   fi
 
-  if [[ "$REPOSITORY" == "ppa-v3" ]]; then
+  if [[ "${REPOSITORY}" == "ppa-v3" ]]; then
     if ! python3 -c 'import sys; assert sys.version_info >= (3,9)' &>/dev/null; then
       log_error "GNS3 v3+ requires Python >= 3.9"
       has_errors=1
@@ -244,11 +237,10 @@ preflight_checks() {
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-# Retry wrapper for apt — transient mirror failures happen
 apt_retry() {
   local attempts=3 i
   for ((i = 1; i <= attempts; i++)); do
-    if apt-get "$@"; then
+    if apt-get "$@" -qq 2>&1 | tail -10; then
       return 0
     fi
     log_warn "apt failed (attempt $i/$attempts), retrying in 5s..."
@@ -257,26 +249,33 @@ apt_retry() {
   log_fatal "apt failed after $attempts attempts: apt-get $*"
 }
 
-# Idempotent group creation
 ensure_group() {
   getent group "$1" &>/dev/null || groupadd --system "$1"
 }
 
-# Detect the real human behind sudo
 detect_invoking_user() {
   if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
     echo "$SUDO_USER"
   fi
 }
 
-# Get public IP with fallback chain
+# Get public IP with fallback chain (dig → curl → UNKNOWN)
 get_public_ip() {
-  curl -sf --max-time 5 https://icanhazip.com 2>/dev/null \
-    || curl -sf --max-time 5 https://ifconfig.me 2>/dev/null \
-    || echo "UNKNOWN"
+  local ip
+  ip=$(dig @ns1.google.com -t txt o-o.myaddr.l.google.com +short -4 2>/dev/null | sed 's/"//g')
+  if [[ -n "$ip" ]]; then echo "$ip"; return; fi
+  ip=$(curl -sf --max-time 5 https://icanhazip.com 2>/dev/null)
+  if [[ -n "$ip" ]]; then echo "$ip"; return; fi
+  ip=$(curl -sf --max-time 5 https://ifconfig.me 2>/dev/null)
+  if [[ -n "$ip" ]]; then echo "$ip"; return; fi
+  echo "UNKNOWN"
 }
 
-# Enable IPv4 forwarding (shared by both VPN types)
+# Get LAN IP — primary interface address
+get_lan_ip() {
+  hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"
+}
+
 enable_ip_forwarding() {
   log_info "Enabling IPv4 forwarding..."
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -287,30 +286,24 @@ enable_ip_forwarding() {
 }
 
 # ─── Ephemeral config file server ─────────────────────────────────────────────
-# Serves VPN client configs via python3 http.server for CONFIG_SERVE_HOURS,
-# then the systemd timer stops it automatically. Replaces nginx-light.
 
 setup_config_server() {
   log_info "Setting up ephemeral config file server (port ${CONFIG_SERVE_PORT}, ${CONFIG_SERVE_HOURS}h TTL)..."
 
-  # Create the serve directory with a UUID path segment so configs aren't guessable
   local serve_uuid
   serve_uuid=$(cat /proc/sys/kernel/random/uuid)
   local serve_path="${CONFIG_SERVE_DIR}/${serve_uuid}"
   mkdir -p "$serve_path"
 
-  # Stash the UUID so the summary banner can reference it
   echo "$serve_uuid" > "${CONFIG_SERVE_DIR}/.serve_uuid"
 
-  # Copy in whichever configs were generated
-  if [[ "$WITH_OPENVPN" -eq 1 && -f /root/client.ovpn ]]; then
+  if [[ "${WITH_OPENVPN}" -eq 1 && -f /root/client.ovpn ]]; then
     cp /root/client.ovpn "${serve_path}/$(hostname).ovpn"
   fi
-  if [[ "$WITH_WIREGUARD" -eq 1 && -f /etc/wireguard/client1.conf ]]; then
+  if [[ "${WITH_WIREGUARD}" -eq 1 && -f /etc/wireguard/client1.conf ]]; then
     cp /etc/wireguard/client1.conf "${serve_path}/wg-client1.conf"
   fi
 
-  # Systemd service — python3 http.server
   cat > /lib/systemd/system/gns3-config-serve.service <<EOF
 [Unit]
 Description=GNS3 ephemeral VPN config server
@@ -326,7 +319,6 @@ Restart=no
 WantedBy=multi-user.target
 EOF
 
-  # Systemd timer — auto-stop after CONFIG_SERVE_HOURS
   cat > /lib/systemd/system/gns3-config-serve-stop.timer <<EOF
 [Unit]
 Description=Stop GNS3 config server after ${CONFIG_SERVE_HOURS} hours
@@ -340,7 +332,6 @@ Unit=gns3-config-serve-stop.service
 WantedBy=timers.target
 EOF
 
-  # Oneshot to stop + disable the server and clean up
   cat > /lib/systemd/system/gns3-config-serve-stop.service <<EOF
 [Unit]
 Description=Stop and clean up GNS3 config server
@@ -359,15 +350,14 @@ EOF
 
   log_ok "Config server live on port ${CONFIG_SERVE_PORT} (auto-stops in ${CONFIG_SERVE_HOURS}h)"
 
-  # MOTD so it shows on next login
-  local my_ip
-  my_ip=$(get_public_ip)
+  local lan_ip
+  lan_ip=$(get_lan_ip)
   cat > /etc/update-motd.d/70-gns3-vpn <<EOFMOTD
 #!/bin/sh
 if systemctl is-active --quiet gns3-config-serve.service 2>/dev/null; then
   echo ""
   echo "────────────────────────────────────────────────────────────────────"
-  echo "  VPN client configs: http://${my_ip}:${CONFIG_SERVE_PORT}/${serve_uuid}/"
+  echo "  VPN client configs: http://${lan_ip}:${CONFIG_SERVE_PORT}/${serve_uuid}/"
   echo "  (server auto-expires — download configs now)"
   echo "────────────────────────────────────────────────────────────────────"
 fi
@@ -378,12 +368,11 @@ EOFMOTD
 # ─── Firewall (ufw) ──────────────────────────────────────────────────────────
 
 configure_firewall() {
-  if [[ "$DISABLE_FIREWALL" -eq 1 ]]; then
+  if [[ "${DISABLE_FIREWALL}" -eq 1 ]]; then
     log_info "Skipping firewall configuration (--without-firewall)"
     return
   fi
 
-  # Check if ufw is present and active
   if ! command -v ufw &>/dev/null; then
     log_warn "No ufw detected. Ensure these ports are open in your firewall:"
     log_warn "  ${REQUIRED_PORTS[*]}"
@@ -400,7 +389,6 @@ configure_firewall() {
 
   for port in "${REQUIRED_PORTS[@]}"; do
     ufw allow "$port"/tcp comment "GNS3 installer" >/dev/null 2>&1
-    # Also allow UDP for VPN ports
     case "$port" in
       1194|51820)
         ufw allow "$port"/udp comment "GNS3 installer (VPN)" >/dev/null 2>&1
@@ -408,8 +396,7 @@ configure_firewall() {
     esac
   done
 
-  # Enable forwarding in ufw if any VPN is configured
-  if [[ "$WITH_OPENVPN" -eq 1 || "$WITH_WIREGUARD" -eq 1 ]]; then
+  if [[ "${WITH_OPENVPN}" -eq 1 || "${WITH_WIREGUARD}" -eq 1 ]]; then
     local ufw_default="/etc/default/ufw"
     if [[ -f "$ufw_default" ]]; then
       if grep -q '^DEFAULT_FORWARD_POLICY="DROP"' "$ufw_default"; then
@@ -438,7 +425,6 @@ setup_gns3_user() {
   mkdir -p "${GNS3_HOME}"/{images,projects,appliances,configs}
 
   if ! id "$GNS3_USER" &>/dev/null; then
-    # Build comma-separated group list
     local groups_csv
     printf -v groups_csv '%s,' "${REQUIRED_GROUPS[@]}"
     groups_csv="${groups_csv%,}"
@@ -452,7 +438,6 @@ setup_gns3_user() {
             "$GNS3_USER"
     log_ok "Created user $GNS3_USER"
   else
-    # User exists — make sure group membership is current
     for grp in "${REQUIRED_GROUPS[@]}"; do
       usermod -aG "$grp" "$GNS3_USER"
     done
@@ -476,7 +461,6 @@ propagate_groups_to_invoker() {
 
 add_gns3_repository() {
   log_info "Adding GNS3 PPA: ppa:gns3/$REPOSITORY"
-  # -E preserves proxy env vars through sudo
   apt-add-repository -y "ppa:gns3/$REPOSITORY" >/dev/null
   log_ok "GNS3 repository added"
 }
@@ -516,13 +500,12 @@ configure_gns3() {
   log_info "Writing GNS3 server configuration..."
 
   local listen_host="0.0.0.0"
-  # If OpenVPN is enabled, bind to the VPN interface only
-  if [[ "$WITH_OPENVPN" -eq 1 ]]; then
+  if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
     listen_host="172.16.253.1"
   fi
 
   local hw_accel="True"
-  if [[ "$DISABLE_KVM" -eq 1 ]]; then
+  if [[ "${DISABLE_KVM}" -eq 1 ]]; then
     hw_accel="False"
     log_warn "KVM disabled — Qemu performance will be degraded"
   fi
@@ -553,8 +536,15 @@ EOF
 install_gns3_service() {
   log_info "Installing GNS3 systemd service..."
 
-  # Use a heredoc with $MAINPID unexpanded (single-quoted delimiter)
-  cat > "$GNS3_SERVICE_FILE" <<'EOF'
+  # Prefer the venv binary — the /usr/bin/gns3server wrapper runs against
+  # system Python which often lacks the gns3_server module.
+  local gns3_bin="/usr/bin/gns3server"
+  if [[ -x "${GNS3_VENV}/bin/gns3server" ]]; then
+    gns3_bin="${GNS3_VENV}/bin/gns3server"
+    log_info "Using venv binary: ${gns3_bin}"
+  fi
+
+  cat > "$GNS3_SERVICE_FILE" <<EOF
 [Unit]
 Description=GNS3 server
 After=network-online.target
@@ -568,8 +558,8 @@ PermissionsStartOnly=true
 EnvironmentFile=/etc/environment
 ExecStartPre=/bin/mkdir -p /var/log/gns3 /var/run/gns3
 ExecStartPre=/bin/chown -R gns3:gns3 /var/log/gns3 /var/run/gns3
-ExecStart=/usr/bin/gns3server --log /var/log/gns3/gns3.log
-ExecReload=/bin/kill -s HUP $MAINPID
+ExecStart=${gns3_bin} --log /var/log/gns3/gns3.log
+ExecReload=/bin/kill -s HUP \$MAINPID
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=16384
@@ -585,16 +575,13 @@ EOF
   log_ok "GNS3 service installed and enabled"
 }
 
-# ─── OpenVPN setup (ported from original) ─────────────────────────────────────
+# ─── OpenVPN setup ────────────────────────────────────────────────────────────
 
 configure_openvpn() {
   log_info "Configuring OpenVPN..."
 
   local my_ip
-  my_ip=$(dig @ns1.google.com -t txt o-o.myaddr.l.google.com +short -4 2>/dev/null | sed 's/"//g')
-  if [[ -z "$my_ip" ]]; then
-    my_ip=$(get_public_ip)
-  fi
+  my_ip=$(get_public_ip)
   log_info "Public IP detected: $my_ip"
 
   local ovpn_uuid
@@ -602,11 +589,9 @@ configure_openvpn() {
   local hostname
   hostname=$(hostname)
 
-  # TUN device
   [[ -d /dev/net ]] || mkdir -p /dev/net
   [[ -c /dev/net/tun ]] || mknod /dev/net/tun c 10 200
 
-  # Generate keys idempotently
   log_info "Generating OpenVPN keys (DH params may take a minute)..."
   mkdir -p /etc/openvpn
   [[ -f /etc/openvpn/dh.pem ]]   || openssl dhparam -out /etc/openvpn/dh.pem 2048
@@ -615,7 +600,6 @@ configure_openvpn() {
   [[ -f /etc/openvpn/csr.pem ]]  || openssl req -new -key /etc/openvpn/key.pem -out /etc/openvpn/csr.pem -subj /CN=OpenVPN/
   [[ -f /etc/openvpn/cert.pem ]] || openssl x509 -req -in /etc/openvpn/csr.pem -out /etc/openvpn/cert.pem -signkey /etc/openvpn/key.pem -days 3650
 
-  # Client config
   cat > /root/client.ovpn <<EOFCLIENT
 client
 nobind
@@ -638,7 +622,6 @@ remote ${my_ip} 1194 udp
 </connection>
 EOFCLIENT
 
-  # Server config
   cat > /etc/openvpn/udp1194.conf <<EOFUDP
 server 172.16.253.0 255.255.255.0
 verb 3
@@ -658,13 +641,11 @@ status openvpn-status-1194.log
 log-append /var/log/openvpn-udp1194.log
 EOFUDP
 
-  # Start OpenVPN
-  systemctl restart openvpn || true   # may fail first run before reboot
-
+  systemctl restart openvpn || true
   log_ok "OpenVPN configured"
 }
 
-# ─── WireGuard setup (new) ────────────────────────────────────────────────────
+# ─── WireGuard setup ──────────────────────────────────────────────────────────
 
 configure_wireguard() {
   log_info "Configuring WireGuard..."
@@ -675,7 +656,6 @@ configure_wireguard() {
   mkdir -p /etc/wireguard
   chmod 700 /etc/wireguard
 
-  # Generate server keys idempotently
   if [[ ! -f /etc/wireguard/server.key ]]; then
     wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub
     chmod 600 /etc/wireguard/server.key
@@ -685,7 +665,6 @@ configure_wireguard() {
   server_privkey=$(cat /etc/wireguard/server.key)
   server_pubkey=$(cat /etc/wireguard/server.pub)
 
-  # Generate a first client keypair for convenience
   if [[ ! -f /etc/wireguard/client1.key ]]; then
     wg genkey | tee /etc/wireguard/client1.key | wg pubkey > /etc/wireguard/client1.pub
     chmod 600 /etc/wireguard/client1.key
@@ -695,7 +674,6 @@ configure_wireguard() {
   client_privkey=$(cat /etc/wireguard/client1.key)
   client_pubkey=$(cat /etc/wireguard/client1.pub)
 
-  # Server interface config
   cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 Address = 172.16.254.1/24
@@ -712,7 +690,6 @@ EOF
 
   chmod 600 /etc/wireguard/wg0.conf
 
-  # Client config for easy download
   cat > /etc/wireguard/client1.conf <<EOF
 [Interface]
 Address = 172.16.254.2/24
@@ -728,11 +705,10 @@ EOF
 
   systemctl enable wg-quick@wg0
   systemctl start wg-quick@wg0 || true
-
   log_ok "WireGuard configured"
 }
 
-# ─── Welcome setup (ported from original) ─────────────────────────────────────
+# ─── Welcome setup ───────────────────────────────────────────────────────────
 
 configure_welcome() {
   log_info "Setting up GNS3-VM welcome console..."
@@ -749,7 +725,6 @@ EOF
   chmod 755 /usr/local/bin/welcome.py
   chown "${GNS3_USER}:${GNS3_USER}" /usr/local/bin/welcome.py
 
-  # Auto-login gns3 on tty1
   mkdir -p /etc/systemd/system/getty@tty1.service.d
   cat > /etc/systemd/system/getty@tty1.service.d/override.conf <<'EOF'
 [Service]
@@ -758,7 +733,6 @@ ExecStart=-/sbin/agetty -a gns3 --noclear %I $TERM
 EOF
   chmod 644 /etc/systemd/system/getty@tty1.service.d/override.conf
 
-  # Launch welcome on login
   grep -q 'welcome.py' "${GNS3_HOME}/.bashrc" 2>/dev/null || \
     echo "python3 /usr/local/bin/welcome.py" >> "${GNS3_HOME}/.bashrc"
 
@@ -774,20 +748,76 @@ EOF
 start_services() {
   log_info "Starting GNS3 service..."
   systemctl restart gns3
-  log_ok "GNS3 service running"
+  sleep 2
 
-  if [[ "$WITH_DOCKER" -eq 1 ]]; then
+  if systemctl is-active --quiet gns3; then
+    log_ok "GNS3 service running"
+  else
+    log_error "GNS3 service failed to start"
+    log_warn "  Check logs: journalctl -u gns3 --no-pager -n 20"
+  fi
+
+  if [[ "${WITH_DOCKER}" -eq 1 ]]; then
     systemctl enable docker
     systemctl start docker
-    log_ok "Docker service running"
+    if systemctl is-active --quiet docker; then
+      log_ok "Docker service running"
+    else
+      log_error "Docker service failed to start"
+    fi
+  fi
+}
+
+# ─── Post-install validation ──────────────────────────────────────────────────
+
+validate() {
+  log_info "Running post-install validation..."
+  local lan_ip
+  lan_ip=$(get_lan_ip)
+  local has_warnings=0
+
+  sleep 3
+
+  if curl -sf --max-time 5 "http://${lan_ip}:3080/v2/version" &>/dev/null; then
+    log_ok "GNS3 API responding on ${lan_ip}:3080"
+  elif curl -sf --max-time 5 "http://localhost:3080/v2/version" &>/dev/null; then
+    log_ok "GNS3 API responding on localhost:3080"
+  else
+    log_warn "GNS3 API not responding — check: journalctl -u gns3 --no-pager -n 20"
+    has_warnings=1
+  fi
+
+  if [[ "${WITH_DOCKER}" -eq 1 ]]; then
+    if docker info &>/dev/null; then
+      log_ok "Docker engine responding"
+    else
+      log_warn "Docker installed but not responding"
+      has_warnings=1
+    fi
+  fi
+
+  local gns3_bin="/usr/bin/gns3server"
+  [[ -x "${GNS3_VENV}/bin/gns3server" ]] && gns3_bin="${GNS3_VENV}/bin/gns3server"
+  if "${gns3_bin}" --version &>/dev/null; then
+    log_ok "gns3server binary: $(${gns3_bin} --version 2>&1 | head -1)"
+  else
+    log_warn "gns3server binary cannot execute — possible Python venv issue"
+    log_warn "  Binary: ${gns3_bin}"
+    log_warn "  Check:  ${gns3_bin} --version"
+    has_warnings=1
+  fi
+
+  if [[ "$has_warnings" -eq 0 ]]; then
+    log_ok "All post-install checks passed"
   fi
 }
 
 # ─── Summary banner ──────────────────────────────────────────────────────────
 
 print_summary() {
-  local my_ip
-  my_ip=$(get_public_ip)
+  local lan_ip public_ip
+  lan_ip=$(get_lan_ip)
+  public_ip=$(get_public_ip)
 
   echo ""
   printf "${GREEN}${BOLD}"
@@ -796,56 +826,77 @@ print_summary() {
   echo "╚══════════════════════════════════════════════════════════════╝"
   printf "${NC}"
   echo ""
-  echo "  GNS3 Server:  http://${my_ip}:3080"
-  echo "  Config:       ${GNS3_CONF_DIR}/gns3_server.conf"
-  echo "  Data:         ${GNS3_HOME}/"
-  echo "  Logs:         /var/log/gns3/gns3.log"
-  echo "  Service:      systemctl status gns3"
+  echo "  ┌─ GNS3 Server ───────────────────────────────────────────────"
+  echo "  │  http://${lan_ip}:3080  (LAN)"
+  echo "  │  Config:   ${GNS3_CONF_DIR}/gns3_server.conf"
+  echo "  │  Data:     ${GNS3_HOME}/"
+  echo "  │  Logs:     /var/log/gns3/gns3.log"
+  echo "  │  Service:  systemctl status gns3"
+  echo "  └─────────────────────────────────────────────────────────────"
   echo ""
 
-  # Show config server URL if VPN configs are being served
-  if [[ -f "${CONFIG_SERVE_DIR}/.serve_uuid" ]]; then
-    local serve_uuid
-    serve_uuid=$(cat "${CONFIG_SERVE_DIR}/.serve_uuid")
-    echo "  ┌─ VPN Client Configs ──────────────────────────────────────"
-    echo "  │  http://${my_ip}:${CONFIG_SERVE_PORT}/${serve_uuid}/"
-    if [[ "$WITH_OPENVPN" -eq 1 ]]; then
-      echo "  │    └─ $(hostname).ovpn"
+  if [[ "${WITH_OPENVPN}" -eq 1 || "${WITH_WIREGUARD}" -eq 1 ]]; then
+    echo "  ┌─ VPN ─────────────────────────────────────────────────────"
+
+    if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
+      echo "  │  WireGuard:  ${public_ip}:51820  (port forwarding required)"
+      echo "  │              172.16.254.1:3080    (via tunnel)"
     fi
-    if [[ "$WITH_WIREGUARD" -eq 1 ]]; then
-      echo "  │    └─ wg-client1.conf"
+
+    if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
+      echo "  │  OpenVPN:    ${public_ip}:1194/udp  (port forwarding required)"
+      echo "  │              172.16.253.1:3080       (via tunnel)"
     fi
-    printf "  │  ${YELLOW}Server auto-expires in ${CONFIG_SERVE_HOURS}h — download configs now${NC}\n"
+
+    if [[ -f "${CONFIG_SERVE_DIR}/.serve_uuid" ]]; then
+      local serve_uuid
+      serve_uuid=$(cat "${CONFIG_SERVE_DIR}/.serve_uuid")
+      echo "  │"
+      echo "  │  Client configs: http://${lan_ip}:${CONFIG_SERVE_PORT}/${serve_uuid}/"
+      if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
+        echo "  │    └─ $(hostname).ovpn"
+      fi
+      if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
+        echo "  │    └─ wg-client1.conf"
+      fi
+      printf "  │  ${YELLOW}Auto-expires in ${CONFIG_SERVE_HOURS}h — download now${NC}\n"
+    fi
+
     echo "  └─────────────────────────────────────────────────────────"
     echo ""
   fi
 
-  if [[ "$DISABLE_KVM" -eq 1 ]]; then
-    printf "  ${YELLOW}KVM:          DISABLED (--without-kvm)${NC}\n"
+  if [[ "${DISABLE_KVM}" -eq 1 ]]; then
+    printf "  ${YELLOW}KVM: DISABLED (--without-kvm)${NC}\n"
+    echo ""
   fi
 
   local invoker
   invoker=$(detect_invoking_user)
   if [[ -n "$invoker" ]]; then
-    echo ""
     printf "  ${CYAN}Note:${NC} Log out and back in as ${BOLD}${invoker}${NC} for group changes to take effect.\n"
+    echo ""
   fi
-
-  echo ""
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MAIN — guarded so `source` loads functions without executing.
-# Run directly: ./script.sh       → executes main
-# Source:       source script.sh   → functions only (for BATS testing)
+# MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 main() {
   export DEBIAN_FRONTEND="noninteractive"
 
+  log_info "Bootstrapping essential packages..."
+  apt-get update -qq 2>/dev/null
+  apt-get install -y -qq curl software-properties-common 2>/dev/null
+  log_ok "Bootstrap complete"
+
+  # Strict mode — inside main() so it doesn't interfere with test sourcing
+  set -euo pipefail
+  trap 'log_error "Script failed at line $LINENO. Partial install may need cleanup."' ERR
+
   preflight_checks
 
-  # OS metadata (available after preflight sources /etc/os-release)
   readonly OS_CODENAME="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
 
   # ── Phase 1: Repositories ──────────────────────────────────────────────────
@@ -868,26 +919,28 @@ main() {
   configure_gns3
   install_gns3_service
 
-  if [[ "$WITH_OPENVPN" -eq 1 ]];   then configure_openvpn; fi
-  if [[ "$WITH_WIREGUARD" -eq 1 ]]; then configure_wireguard; fi
-  if [[ "$WITH_WELCOME" -eq 1 ]];   then configure_welcome; fi
+  if [[ "${WITH_OPENVPN}" -eq 1 ]];   then configure_openvpn; fi
+  if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then configure_wireguard; fi
+  if [[ "${WITH_WELCOME}" -eq 1 ]];   then configure_welcome; fi
 
-  # Shared VPN plumbing
-  if [[ "$WITH_OPENVPN" -eq 1 || "$WITH_WIREGUARD" -eq 1 ]]; then
+  if [[ "${WITH_OPENVPN}" -eq 1 || "${WITH_WIREGUARD}" -eq 1 ]]; then
     enable_ip_forwarding
     setup_config_server
   fi
 
-  # Firewall
   configure_firewall
 
   # ── Phase 5: Start ─────────────────────────────────────────────────────────
 
   start_services
 
-  # ── Phase 6: Welcome post-install repair (matches original behavior) ───────
+  # ── Phase 6: Validate ──────────────────────────────────────────────────────
 
-  if [[ "$WITH_WELCOME" -eq 1 ]]; then
+  validate
+
+  # ── Phase 7: Welcome post-install repair ───────────────────────────────────
+
+  if [[ "${WITH_WELCOME}" -eq 1 ]]; then
     python3 -c 'import sys; sys.path.append("/usr/local/bin/"); import welcome; ws = welcome.Welcome_dialog(); ws.repair_remote_install()' || true
   fi
 
@@ -896,7 +949,6 @@ main() {
   print_summary
 }
 
-# Only run main when executed directly (not when sourced for testing)
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main "$@"
 fi
