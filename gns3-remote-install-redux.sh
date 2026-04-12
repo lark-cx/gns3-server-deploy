@@ -56,6 +56,13 @@ log_fatal() { printf "${RED}[FATAL]${NC} %s\n" "$1" >&2; exit 1; }
 # Testability wrapper — EUID is readonly in bash, so tests override this function
 is_root() { [[ "$EUID" -eq 0 ]]; }
 
+# Sticky warnings — collected throughout execution, displayed before summary
+WARNINGS=()
+log_warn_sticky() {
+  log_warn "$1"
+  WARNINGS+=("$1")
+}
+
 # ─── Mutable arrays (built up by option flags) ───────────────────────────────
 
 REQUIRED_CMDS=(apt apt-add-repository dpkg chown chmod useradd usermod lsmod systemctl ss openssl)
@@ -169,10 +176,6 @@ fi
 preflight_checks() {
   local has_errors=0
 
-  if ! is_root; then
-    log_fatal "Must run as root. Try: sudo $0"
-  fi
-
   if [[ ! "${OSTYPE}" == linux-gnu* ]]; then
     log_fatal "This script requires Linux (detected: $OSTYPE)."
   fi
@@ -207,18 +210,33 @@ preflight_checks() {
     has_errors=1
   fi
 
+  # Load missing kernel modules automatically unless --without-kvm
   local missing_mods=()
   for mod in "${REQUIRED_MODS[@]}"; do
-    lsmod | grep -wq "$mod" 2>/dev/null || missing_mods+=("$mod")
+    if ! lsmod | grep -wq "$mod" 2>/dev/null; then
+      if [[ "$mod" == "kvm" && "${DISABLE_KVM}" -eq 1 ]]; then
+        continue
+      fi
+      log_info "Loading kernel module: $mod"
+      if modprobe "$mod" 2>/dev/null; then
+        log_ok "Loaded $mod"
+        # Persist across reboots
+        if ! grep -qx "$mod" /etc/modules-load.d/gns3.conf 2>/dev/null; then
+          echo "$mod" >> /etc/modules-load.d/gns3.conf
+        fi
+      else
+        missing_mods+=("$mod")
+      fi
+    fi
   done
   if [[ ${#missing_mods[@]} -gt 0 ]]; then
-    log_warn "Kernel module(s) not loaded: ${missing_mods[*]}"
-    log_warn "  To load now:        modprobe ${missing_mods[*]}"
-    log_warn "  To persist on boot: echo '${missing_mods[*]}' >> /etc/modules-load.d/gns3.conf"
+    log_warn_sticky "Kernel module(s) could not be loaded: ${missing_mods[*]}"
+    log_warn_sticky "  Manual fix: modprobe ${missing_mods[*]}"
   fi
 
   if [[ "${DISABLE_KVM}" -eq 0 ]] && [[ $(grep -Ec '(vmx|svm)' /proc/cpuinfo) -eq 0 ]]; then
-    log_warn "CPU virtualization extensions not detected. Pass --without-kvm if intentional."
+    log_warn_sticky "CPU virtualization extensions not detected. KVM will not function."
+    log_warn_sticky "  If running in a VM without nested virt, pass --without-kvm"
   fi
 
   if [[ "${REPOSITORY}" == "ppa-v3" ]]; then
@@ -240,7 +258,7 @@ preflight_checks() {
 apt_retry() {
   local attempts=3 i
   for ((i = 1; i <= attempts; i++)); do
-    if apt-get "$@" -qq 2>&1 | tail -10; then
+    if apt-get "$@"; then
       return 0
     fi
     log_warn "apt failed (attempt $i/$attempts), retrying in 5s..."
@@ -283,6 +301,36 @@ enable_ip_forwarding() {
     echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
   fi
   log_ok "IPv4 forwarding enabled (persistent)"
+}
+
+# Apply baseline sysctl hardening — safe, standard CIS recommendations
+apply_sysctl_hardening() {
+  log_info "Applying sysctl hardening..."
+
+  local -A _sysctls=(
+    ["net.ipv4.conf.all.rp_filter"]="1"               # Reverse path filtering (anti-spoofing)
+    ["net.ipv4.conf.default.rp_filter"]="1"
+    ["net.ipv4.tcp_syncookies"]="1"                    # SYN flood protection
+    ["net.ipv4.conf.all.accept_redirects"]="0"         # Ignore ICMP redirects
+    ["net.ipv4.conf.default.accept_redirects"]="0"
+    ["net.ipv4.conf.all.send_redirects"]="0"
+    ["net.ipv4.conf.default.send_redirects"]="0"
+    ["net.ipv4.conf.all.accept_source_route"]="0"      # Disable source routing
+    ["net.ipv4.conf.default.accept_source_route"]="0"
+    ["net.ipv6.conf.all.accept_redirects"]="0"
+    ["net.ipv6.conf.default.accept_redirects"]="0"
+  )
+
+  local _sysctl_file="/etc/sysctl.d/90-gns3-hardening.conf"
+  : > "${_sysctl_file}"
+
+  for _key in "${!_sysctls[@]}"; do
+    local _val="${_sysctls[$_key]}"
+    echo "${_key}=${_val}" >> "${_sysctl_file}"
+    sysctl -w "${_key}=${_val}" >/dev/null 2>&1
+  done
+
+  log_ok "Sysctl hardening applied (${_sysctl_file})"
 }
 
 # ─── Ephemeral config file server ─────────────────────────────────────────────
@@ -753,8 +801,8 @@ start_services() {
   if systemctl is-active --quiet gns3; then
     log_ok "GNS3 service running"
   else
-    log_error "GNS3 service failed to start"
-    log_warn "  Check logs: journalctl -u gns3 --no-pager -n 20"
+    log_warn_sticky "GNS3 service failed to start"
+    log_warn_sticky "  Check logs: journalctl -u gns3 --no-pager -n 20"
   fi
 
   if [[ "${WITH_DOCKER}" -eq 1 ]]; then
@@ -763,7 +811,7 @@ start_services() {
     if systemctl is-active --quiet docker; then
       log_ok "Docker service running"
     else
-      log_error "Docker service failed to start"
+      log_warn_sticky "Docker service failed to start"
     fi
   fi
 }
@@ -774,7 +822,6 @@ validate() {
   log_info "Running post-install validation..."
   local lan_ip
   lan_ip=$(get_lan_ip)
-  local has_warnings=0
 
   sleep 3
 
@@ -783,16 +830,15 @@ validate() {
   elif curl -sf --max-time 5 "http://localhost:3080/v2/version" &>/dev/null; then
     log_ok "GNS3 API responding on localhost:3080"
   else
-    log_warn "GNS3 API not responding — check: journalctl -u gns3 --no-pager -n 20"
-    has_warnings=1
+    log_warn_sticky "GNS3 API not responding on port 3080"
+    log_warn_sticky "  Check: journalctl -u gns3 --no-pager -n 20"
   fi
 
   if [[ "${WITH_DOCKER}" -eq 1 ]]; then
     if docker info &>/dev/null; then
       log_ok "Docker engine responding"
     else
-      log_warn "Docker installed but not responding"
-      has_warnings=1
+      log_warn_sticky "Docker installed but not responding"
     fi
   fi
 
@@ -801,13 +847,12 @@ validate() {
   if "${gns3_bin}" --version &>/dev/null; then
     log_ok "gns3server binary: $(${gns3_bin} --version 2>&1 | head -1)"
   else
-    log_warn "gns3server binary cannot execute — possible Python venv issue"
-    log_warn "  Binary: ${gns3_bin}"
-    log_warn "  Check:  ${gns3_bin} --version"
-    has_warnings=1
+    log_warn_sticky "gns3server binary cannot execute — possible Python venv issue"
+    log_warn_sticky "  Binary: ${gns3_bin}"
+    log_warn_sticky "  Check:  ${gns3_bin} --version"
   fi
 
-  if [[ "$has_warnings" -eq 0 ]]; then
+  if [[ ${#WARNINGS[@]} -eq 0 ]]; then
     log_ok "All post-install checks passed"
   fi
 }
@@ -877,6 +922,18 @@ print_summary() {
     printf "  ${CYAN}Note:${NC} Log out and back in as ${BOLD}${invoker}${NC} for group changes to take effect.\n"
     echo ""
   fi
+
+  # ── Warnings rollup ──────────────────────────────────────────────────────
+  if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+    printf "  ${YELLOW}${BOLD}"
+    echo "┌─ Action Required ──────────────────────────────────────────"
+    printf "  ${NC}"
+    for _warning in "${WARNINGS[@]}"; do
+      printf "  ${YELLOW}│${NC}  %s\n" "$_warning"
+    done
+    printf "  ${YELLOW}└───────────────────────────────────────────────────────────${NC}\n"
+    echo ""
+  fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -886,9 +943,14 @@ print_summary() {
 main() {
   export DEBIAN_FRONTEND="noninteractive"
 
+  # Root check first — before we try to apt anything
+  if ! is_root; then
+    log_fatal "Must run as root. Try: sudo $0"
+  fi
+
   log_info "Bootstrapping essential packages..."
-  apt-get update -qq 2>/dev/null
-  apt-get install -y -qq curl software-properties-common 2>/dev/null
+  apt-get update -qq >/dev/null 2>&1
+  apt-get install -y -qq curl software-properties-common >/dev/null 2>&1
   log_ok "Bootstrap complete"
 
   # Strict mode — inside main() so it doesn't interfere with test sourcing
@@ -929,6 +991,7 @@ main() {
   fi
 
   configure_firewall
+  apply_sysctl_hardening
 
   # ── Phase 5: Start ─────────────────────────────────────────────────────────
 
