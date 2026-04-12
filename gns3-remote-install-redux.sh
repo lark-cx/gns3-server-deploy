@@ -35,6 +35,7 @@ readonly GNS3_VENV="/usr/share/gns3/gns3-server"
 readonly CONFIG_SERVE_PORT=8003
 readonly CONFIG_SERVE_DIR="/var/lib/gns3-config-serve"
 readonly CONFIG_SERVE_HOURS=2
+readonly DEPLOY_MARKER="# deployed by gns3-remote-install-redux"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 
@@ -200,6 +201,19 @@ preflight_checks() {
   fi
 
   local busy_ports=()
+  local _is_reconfigure=0
+
+  # Detect reconfigure: our config marker + gns3 service running
+  if [[ -f "${GNS3_CONF_DIR}/gns3_server.conf" ]] \
+    && grep -q "${DEPLOY_MARKER}" "${GNS3_CONF_DIR}/gns3_server.conf" 2>/dev/null \
+    && systemctl is-active --quiet gns3 2>/dev/null; then
+    _is_reconfigure=1
+    log_info "Existing installation detected — running in reconfigure mode"
+    systemctl stop gns3
+    # Stop config server if still running from a previous install
+    systemctl stop gns3-config-serve.service 2>/dev/null || true
+  fi
+
   for port in "${REQUIRED_PORTS[@]}"; do
     if ss -tlnH | grep -q ":${port} "; then
       busy_ports+=("$port")
@@ -257,13 +271,20 @@ preflight_checks() {
 
 apt_retry() {
   local attempts=3 i
+  local _apt_log
+  _apt_log=$(mktemp)
   for ((i = 1; i <= attempts; i++)); do
-    if apt-get "$@"; then
+    if apt-get "$@" -qq >"${_apt_log}" 2>&1; then
+      rm -f "${_apt_log}"
       return 0
     fi
     log_warn "apt failed (attempt $i/$attempts), retrying in 5s..."
+    tail -5 "${_apt_log}" >&2
     sleep 5
   done
+  log_error "apt output:"
+  tail -10 "${_apt_log}" >&2
+  rm -f "${_apt_log}"
   log_fatal "apt failed after $attempts attempts: apt-get $*"
 }
 
@@ -336,7 +357,14 @@ apply_sysctl_hardening() {
 # ─── Ephemeral config file server ─────────────────────────────────────────────
 
 setup_config_server() {
-  log_info "Setting up ephemeral config file server (port ${CONFIG_SERVE_PORT}, ${CONFIG_SERVE_HOURS}h TTL)..."
+  log_info "Setting up config server (port ${CONFIG_SERVE_PORT}, ${CONFIG_SERVE_HOURS}h TTL)..."
+
+  # Stop existing server if running from a previous install
+  systemctl stop gns3-config-serve.service 2>/dev/null || true
+  systemctl stop gns3-config-serve-stop.timer 2>/dev/null || true
+
+  # Clean previous serve directory
+  rm -rf "${CONFIG_SERVE_DIR}"
 
   local serve_uuid
   serve_uuid=$(cat /proc/sys/kernel/random/uuid)
@@ -351,6 +379,171 @@ setup_config_server() {
   if [[ "${WITH_WIREGUARD}" -eq 1 && -f /etc/wireguard/client1.conf ]]; then
     cp /etc/wireguard/client1.conf "${serve_path}/wg-client1.conf"
   fi
+
+  # Generate landing page
+  local _lan_ip _public_ip _gns3_ver _gns3_bin
+  _lan_ip=$(get_lan_ip)
+  _public_ip=$(get_public_ip)
+  _gns3_bin="/usr/bin/gns3server"
+  [[ -x "${GNS3_VENV}/bin/gns3server" ]] && _gns3_bin="${GNS3_VENV}/bin/gns3server"
+  _gns3_ver=$("${_gns3_bin}" --version 2>&1 | head -1 || echo "unknown")
+
+  # Build warnings JSON array
+  local _warnings_json="[]"
+  if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+    _warnings_json="["
+    for _w in "${WARNINGS[@]}"; do
+      _warnings_json+="\"$(echo "${_w}" | sed 's/"/\\"/g')\","
+    done
+    _warnings_json="${_warnings_json%,}]"
+  fi
+
+  cat > "${CONFIG_SERVE_DIR}/index.html" <<'EOHTML'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GNS3 Server</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Josefin+Sans:wght@400;700&family=Fira+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #070600; color: #e0e0e0;
+    font-family: 'Josefin Sans', sans-serif;
+    font-size: 16px; line-height: 1.6;
+    padding: 2rem; max-width: 700px; margin: 0 auto;
+  }
+  h1 { font-family: 'Bebas Neue', sans-serif; color: #FF1053;
+       font-size: 2.5rem; letter-spacing: 2px; margin-bottom: 0.5rem; }
+  h2 { font-family: 'Bebas Neue', sans-serif; color: #FF1053;
+       font-size: 1.4rem; letter-spacing: 1px; margin: 2rem 0 0.5rem;
+       border-bottom: 1px solid #333; padding-bottom: 0.3rem; }
+  a { color: #FF1053; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: 'Fira Mono', monospace; font-size: 0.9em;
+                background: #1a1a1a; padding: 2px 6px; border-radius: 3px; }
+  .card { background: #111; border: 1px solid #222;
+          padding: 1rem; margin: 0.5rem 0; border-radius: 4px; }
+  .warn { border-left: 3px solid #FF1053; }
+  .dl { display: inline-block; background: #FF1053; color: #070600;
+        padding: 0.4rem 1rem; font-weight: 700; margin: 0.3rem 0.3rem 0.3rem 0;
+        border-radius: 3px; font-size: 0.9rem; }
+  .dl:hover { background: #cc0d42; text-decoration: none; }
+  .muted { color: #666; font-size: 0.85rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+  @media (max-width: 500px) { .grid { grid-template-columns: 1fr; } }
+  #timer { color: #FF1053; font-family: 'Fira Mono', monospace; }
+</style>
+</head>
+<body>
+<h1>GNS3 SERVER</h1>
+<p class="muted">deployed by <a href="https://lark.cx">lark.cx</a></p>
+
+<div id="app"></div>
+
+<script>
+EOHTML
+
+  # Inject data as JS — continues inside the script tag
+  cat >> "${CONFIG_SERVE_DIR}/index.html" <<EOFJS
+const D = {
+  lan_ip: "${_lan_ip}",
+  public_ip: "${_public_ip}",
+  hostname: "$(hostname)",
+  gns3_version: "${_gns3_ver}",
+  with_openvpn: ${WITH_OPENVPN},
+  with_wireguard: ${WITH_WIREGUARD},
+  with_docker: ${WITH_DOCKER},
+  disable_kvm: ${DISABLE_KVM},
+  serve_uuid: "${serve_uuid}",
+  serve_hours: ${CONFIG_SERVE_HOURS},
+  serve_port: ${CONFIG_SERVE_PORT},
+  warnings: ${_warnings_json}
+};
+EOFJS
+
+  # App JS — single-quoted heredoc so no shell expansion
+  cat >> "${CONFIG_SERVE_DIR}/index.html" <<'EOHTML2'
+const $ = document.getElementById('app');
+let h = '';
+
+// Server info
+h += '<h2>YOUR SERVER</h2>';
+h += '<div class="card">';
+h += `<p><strong>GNS3:</strong> <a href="http://${D.lan_ip}:3080">http://${D.lan_ip}:3080</a></p>`;
+h += `<p><strong>Version:</strong> <code>${D.gns3_version}</code></p>`;
+h += `<p><strong>Host:</strong> ${D.hostname}</p>`;
+h += `<p><strong>Docker:</strong> ${D.with_docker ? 'Yes' : 'No'}</p>`;
+h += `<p><strong>KVM:</strong> ${D.disable_kvm ? '<span style="color:#FF1053">Disabled</span>' : 'Enabled'}</p>`;
+h += '</div>';
+
+// VPN configs
+if (D.with_wireguard || D.with_openvpn) {
+  h += '<h2>VPN</h2>';
+  h += '<div class="card">';
+  if (D.with_wireguard) {
+    h += `<p><strong>WireGuard:</strong> ${D.public_ip}:51820</p>`;
+    h += `<p>Tunnel: <code>172.16.254.1:3080</code></p>`;
+    h += `<a class="dl" href="${D.serve_uuid}/wg-client1.conf">Download WireGuard Config</a> `;
+  }
+  if (D.with_openvpn) {
+    h += `<p><strong>OpenVPN:</strong> ${D.public_ip}:1194/udp</p>`;
+    h += `<p>Tunnel: <code>172.16.253.1:3080</code></p>`;
+    h += `<a class="dl" href="${D.serve_uuid}/${D.hostname}.ovpn">Download OpenVPN Config</a> `;
+  }
+  h += '<p class="muted" style="margin-top:0.5rem">Port forwarding required on your router.</p>';
+  h += '</div>';
+}
+
+// Client downloads
+h += '<h2>GNS3 CLIENT</h2>';
+h += '<div class="grid">';
+h += '<div class="card"><strong>Windows</strong><br>';
+h += '<a class="dl" href="https://github.com/GNS3/gns3-gui/releases/latest">GNS3 Client</a>';
+h += '<br><a class="dl" href="https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html">PuTTY</a>';
+h += '</div>';
+h += '<div class="card"><strong>macOS</strong><br>';
+h += '<a class="dl" href="https://github.com/GNS3/gns3-gui/releases/latest">GNS3 Client</a>';
+h += '<br><a class="dl" href="https://iterm2.com">iTerm2</a>';
+h += '</div>';
+h += '<div class="card"><strong>Linux</strong><br>';
+h += '<a class="dl" href="https://github.com/GNS3/gns3-gui/releases/latest">GNS3 Client</a>';
+h += '<br><code>sudo apt install gns3-gui</code>';
+h += '</div>';
+h += '</div>';
+
+// Resources
+h += '<h2>RESOURCES</h2>';
+h += '<div class="card">';
+h += '<p><a href="https://gns3.com/marketplace/appliances">GNS3 Appliance Marketplace</a></p>';
+h += '<p><a href="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso">VirtIO Windows Drivers</a></p>';
+h += '<p><a href="https://docs.gns3.com">GNS3 Documentation</a></p>';
+h += '<p><a href="https://lark.cx">lark.cx tutorials</a></p>';
+h += '</div>';
+
+// Warnings
+if (D.warnings.length > 0) {
+  h += '<h2>WARNINGS</h2>';
+  D.warnings.forEach(w => {
+    h += `<div class="card warn"><code>${w}</code></div>`;
+  });
+}
+
+// Timer
+h += '<h2>THIS PAGE</h2>';
+h += '<div class="card">';
+h += `<p>Auto-expires in <span id="timer">${D.serve_hours}h</span></p>`;
+h += '<p class="muted">Download configs before this page disappears.</p>';
+h += '</div>';
+
+$.innerHTML = h;
+</script>
+</body>
+</html>
+EOHTML2
+
+  log_ok "Landing page generated"
 
   cat > /lib/systemd/system/gns3-config-serve.service <<EOF
 [Unit]
@@ -560,6 +753,7 @@ configure_gns3() {
 
   mkdir -p "$GNS3_CONF_DIR"
   cat > "${GNS3_CONF_DIR}/gns3_server.conf" <<EOF
+${DEPLOY_MARKER}
 [Server]
 host = ${listen_host}
 port = 3080
@@ -866,72 +1060,61 @@ print_summary() {
 
   echo ""
   printf "${GREEN}${BOLD}"
-  echo "╔══════════════════════════════════════════════════════════════╗"
-  echo "║              GNS3 Server Installation Complete              ║"
-  echo "╚══════════════════════════════════════════════════════════════╝"
+  echo "  GNS3 Server Install Complete"
   printf "${NC}"
+  echo "  ──────────────────────────────────"
   echo ""
-  echo "  ┌─ GNS3 Server ───────────────────────────────────────────────"
-  echo "  │  http://${lan_ip}:3080  (LAN)"
-  echo "  │  Config:   ${GNS3_CONF_DIR}/gns3_server.conf"
-  echo "  │  Data:     ${GNS3_HOME}/"
-  echo "  │  Logs:     /var/log/gns3/gns3.log"
-  echo "  │  Service:  systemctl status gns3"
-  echo "  └─────────────────────────────────────────────────────────────"
+  echo "  Server: http://${lan_ip}:3080"
+  echo "  Config: ${GNS3_CONF_DIR}/gns3_server.conf"
+  echo "  Data:   ${GNS3_HOME}/"
+  echo "  Logs:   /var/log/gns3/gns3.log"
+  echo "  Status: systemctl status gns3"
   echo ""
 
   if [[ "${WITH_OPENVPN}" -eq 1 || "${WITH_WIREGUARD}" -eq 1 ]]; then
-    echo "  ┌─ VPN ─────────────────────────────────────────────────────"
+    echo "  VPN"
+    echo "  ──────────────────────────────────"
 
     if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
-      echo "  │  WireGuard:  ${public_ip}:51820  (port forwarding required)"
-      echo "  │              172.16.254.1:3080    (via tunnel)"
+      echo "  WireGuard: ${public_ip}:51820"
+      echo "    Tunnel:  172.16.254.1:3080"
     fi
 
     if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
-      echo "  │  OpenVPN:    ${public_ip}:1194/udp  (port forwarding required)"
-      echo "  │              172.16.253.1:3080       (via tunnel)"
+      echo "  OpenVPN:   ${public_ip}:1194/udp"
+      echo "    Tunnel:  172.16.253.1:3080"
     fi
 
     if [[ -f "${CONFIG_SERVE_DIR}/.serve_uuid" ]]; then
       local serve_uuid
       serve_uuid=$(cat "${CONFIG_SERVE_DIR}/.serve_uuid")
-      echo "  │"
-      echo "  │  Client configs: http://${lan_ip}:${CONFIG_SERVE_PORT}/${serve_uuid}/"
-      if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
-        echo "  │    └─ $(hostname).ovpn"
-      fi
-      if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
-        echo "  │    └─ wg-client1.conf"
-      fi
-      printf "  │  ${YELLOW}Auto-expires in ${CONFIG_SERVE_HOURS}h — download now${NC}\n"
+      echo ""
+      echo "  Config download:"
+      echo "  http://${lan_ip}:${CONFIG_SERVE_PORT}/${serve_uuid}/"
+      printf "  ${YELLOW}Expires in ${CONFIG_SERVE_HOURS}h${NC}\n"
     fi
-
-    echo "  └─────────────────────────────────────────────────────────"
     echo ""
   fi
 
   if [[ "${DISABLE_KVM}" -eq 1 ]]; then
-    printf "  ${YELLOW}KVM: DISABLED (--without-kvm)${NC}\n"
+    printf "  ${YELLOW}KVM: DISABLED${NC}\n"
     echo ""
   fi
 
   local invoker
   invoker=$(detect_invoking_user)
   if [[ -n "$invoker" ]]; then
-    printf "  ${CYAN}Note:${NC} Log out and back in as ${BOLD}${invoker}${NC} for group changes to take effect.\n"
+    printf "  ${CYAN}Log out/in as ${invoker}${NC}"
+    echo " for group changes"
     echo ""
   fi
 
-  # ── Warnings rollup ──────────────────────────────────────────────────────
   if [[ ${#WARNINGS[@]} -gt 0 ]]; then
-    printf "  ${YELLOW}${BOLD}"
-    echo "┌─ Action Required ──────────────────────────────────────────"
-    printf "  ${NC}"
+    printf "  ${YELLOW}${BOLD}Action Required${NC}\n"
+    echo "  ──────────────────────────────────"
     for _warning in "${WARNINGS[@]}"; do
-      printf "  ${YELLOW}│${NC}  %s\n" "$_warning"
+      printf "  ${YELLOW}!${NC} %s\n" "$_warning"
     done
-    printf "  ${YELLOW}└───────────────────────────────────────────────────────────${NC}\n"
     echo ""
   fi
 }
@@ -987,8 +1170,10 @@ main() {
 
   if [[ "${WITH_OPENVPN}" -eq 1 || "${WITH_WIREGUARD}" -eq 1 ]]; then
     enable_ip_forwarding
-    setup_config_server
   fi
+
+  # Config server always runs — serves landing page + any VPN configs
+  setup_config_server
 
   configure_firewall
   apply_sysctl_hardening
