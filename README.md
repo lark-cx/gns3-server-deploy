@@ -1,37 +1,34 @@
 # gns3-remote-install-redux
 
-Drop-in replacement for the [upstream GNS3 remote installer](https://github.com/GNS3/gns3-server/blob/master/scripts/remote-install.sh). Same job, fewer footguns.
+Revised version of the OG [upstream GNS3 remote installer](https://github.com/GNS3/gns3-server/blob/master/scripts/remote-install.sh). 
 
 ## Why
 
-The original script installs GNS3 on Ubuntu Server. It works. It also:
+The OG script served me well but but I wanted to address some components that were either inefficient, outdated, or brittle. The OG:
 
-- Calls `apt` five or six times instead of once
-- Fails on one problem at a time (fix, re-run, fix, re-run)
+- Calls `apt` 5 times instead of once
+- Fails on 1 problem at a time (fix, re-run, fix, re-run)
 - Doesn't retry anything
-- Doesn't verify anything after install
-- Uses a system Python wrapper that crashes with `ModuleNotFoundError` on newer packages
+- Doesn't verify anything post-install
 - Installs nginx to serve one file
 - Has no WireGuard support
 - Ships RSA-2048 + DH params (slow, legacy) with `comp-lzo` (deprecated, vulnerable)
 - Opens all firewall ports or none
 
-This script fixes all of that.
-
 ## What's different
 
-- **Single apt pass** — packages, repos, and groups rolled up from flags before any install runs
-- **Preflight** — checks root, OS, commands, ports, modules, CPU virt. Reports everything at once
+- **Single apt pass** — packages, repos, and groups rolled up from flags before install runs
+- **Preflight** — checks root, OS, needed commands, ports, modules, CPU virt extensions. Reports everything at once
 - **Auto-loads KVM** — `modprobe` + persist to `/etc/modules-load.d/`, unless `--without-kvm`
 - **Retry + verify** — apt retries 3x with backoff; services verified with `systemctl is-active`; GNS3 API curled post-install
-- **Venv-aware** — detects and uses `/usr/share/gns3/gns3-server/bin/gns3server` instead of the broken `/usr/bin` wrapper
-- **WireGuard** — first-class VPN option alongside OpenVPN
-- **EC crypto** — P-384 by default for OpenVPN (instant keygen, no DH params). `--legacy-rsa` if you need it
-- **Encrypted configs** — VPN configs served encrypted with a one-time passphrase. `--unsafe-configs` to skip
-- **Scoped firewall** — UFW rules allow VPN from anywhere, everything else scoped to SSH source + local subnets
+- **Venv-aware** — detects and uses `/usr/share/gns3/gns3-server/bin/gns3server` in place of fragile `/usr/bin` wrapper
+- **WireGuard** — modern VPN option
+- **EC crypto** — P-384 by default for OpenVPN (fast keygen, no DH params). `--legacy-rsa` if needed
+- **Encrypted configs** — VPN configs are encrypted with one-time passphrase. `--unsafe-configs` to skip
+- **Scoped firewall** — UFW rules allow VPN from 0.0.0.0/0, others scoped to SSH source + local subnets
 - **Sysctl hardening** — rp_filter, syncookies, ICMP redirect rejection, source route disable
-- **Landing page** — ephemeral web page with server info, version-matched client downloads, VPN configs, warnings, and resources. Auto-expires via systemd timer
-- **Reconfigure mode** — detects prior install, stops services, re-runs cleanly
+- **Landing page** — ephemeral web page gives server info, version-matched client downloads, VPN configs, warnings, and resources. Auto-expires via systemd timer
+- **Reconfigure mode** — enhanced idempotence, detects prior install, stops services, re-runs cleanly
 - **Testable** — `main()` guarded so functions can be sourced for BATS or plain bash tests
 
 ## Usage
