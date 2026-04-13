@@ -3,12 +3,18 @@
 # gns3-remote-install-redux.sh
 # Install GNS3 on a remote Ubuntu LTS server.
 #
-# Based on the upstream GNS3 remote installer, rewritten to:
-#   - consolidate all apt calls into a single pass
-#   - add preflight validation (commands, ports, kernel modules, CPU virt)
-#   - add WireGuard as a VPN option alongside OpenVPN
-#   - remove IOU support entirely
-#   - ensure the invoking user (SUDO_USER) gets added to all required groups
+# Based on the upstream GNS3 remote installer.
+# Link: https://raw.githubusercontent.com/GNS3/gns3-server/master/scripts/remote-install.sh
+#
+#  Rewritten to:
+#   - consolidate almost all apt calls into 1 pass
+#   - add preflight validations (commands, ports, kernel modules, CPU virt)
+#   - add a WireGuard VPN option
+#   - default to ECC (instead of RSA) in OpenVPN
+#   - encrypt configs (decryption is a copy+paste curl | openssl  1-liner 
+#   - ensure invoking user (SUDO_USER) and add to all required groups
+#   - detect firewall and configure scoped allow rules if UFW
+#   - avoid nginx install - ephemeral http.server on systemd timer
 #   - improve idempotency, error recovery, and logging
 #
 # Usage: sudo ./gns3-remote-install-redux.sh [OPTIONS]
@@ -20,6 +26,7 @@
 #   --without-firewall        Skip automatic UFW rule configuration
 #   --without-system-upgrade  Skip apt upgrade
 #   --unsafe-configs          Serve VPN configs unencrypted (not recommended)
+#   --legacy-rsa              Use RSA-2048 + DH for OpenVPN (default: EC P-384)
 #   --unstable                Use GNS3 unstable PPA
 #   --custom-repository REPO  Use a custom GNS3 PPA name
 #   -h, --help                Show this help
@@ -101,6 +108,7 @@ DISABLE_KVM=0
 DISABLE_FIREWALL=0
 NO_SYSTEM_UPGRADE=0
 UNSAFE_CONFIGS=0
+USE_LEGACY_RSA=0
 REPOSITORY="ppa"
 
 ### Help ####################################################################─
@@ -120,6 +128,7 @@ ${BOLD}Options:${NC}
   --without-firewall        Skip automatic UFW rule configuration
   --without-system-upgrade  Skip apt upgrade step
   --unsafe-configs          Serve VPN configs unencrypted
+  --legacy-rsa              Use RSA-2048 + DH for OpenVPN (default: EC P-384)
   --unstable                Use the GNS3 unstable PPA
   --custom-repository REPO  Use a custom GNS3 PPA name
   -h, --help                Show this help
@@ -128,7 +137,7 @@ EOF
 
 ### Argument parsing ##########################################################
 
-TEMP=$(getopt -o h --long with-openvpn,with-wireguard,with-welcome,without-kvm,without-docker,without-firewall,without-system-upgrade,unsafe-configs,unstable,custom-repository:,help -n "$0" -- "$@") || { show_help; exit 1; }
+TEMP=$(getopt -o h --long with-openvpn,with-wireguard,with-welcome,without-kvm,without-docker,without-firewall,without-system-upgrade,unsafe-configs,legacy-rsa,unstable,custom-repository:,help -n "$0" -- "$@") || { show_help; exit 1; }
 eval set -- "${TEMP}"
 
 while true; do
@@ -141,6 +150,7 @@ while true; do
     --without-firewall)       DISABLE_FIREWALL=1;     shift ;;
     --without-system-upgrade) NO_SYSTEM_UPGRADE=1;    shift ;;
     --unsafe-configs)         UNSAFE_CONFIGS=1;       shift ;;
+    --legacy-rsa)             USE_LEGACY_RSA=1;       shift ;;
     --unstable)               REPOSITORY="unstable";  shift ;;
     --custom-repository)      REPOSITORY="$2";        shift 2 ;;
     -h|--help)                show_help; exit 0 ;;
@@ -922,15 +932,14 @@ configure_openvpn() {
 
   log_info "Generating OpenVPN keys..."
   mkdir -p /etc/openvpn
-  if [[ "${USE_LEGACY_RSA}" == 1 ]]; then 
-    log_info "Using legacy crypto (DH params may take a minute)..."
-    [[ -f /etc/openvpn/dh.pem ]]   || openssl dhparam -out /etc/openvpn/dh.pem 2048
-    [[ -f /etc/openvpn/key.pem ]]  || openssl genrsa -out /etc/openvpn/key.pem 2048
-  fi
-  if [[ "${USE_LEGACY_RSA}" == 0 ]]; then
-     log_info "Usinng elliptic curves..."
-     [[ -f /etc/openvpn/key.pem ]] || openssl ecparam -name secp384r1 -genkey \
-       -noout -out /etc/openvpn/key.pem
+  if [[ "${USE_LEGACY_RSA}" -eq 1 ]]; then
+    log_info "Using legacy RSA crypto (DH params may take a minute)..."
+    [[ -f /etc/openvpn/dh.pem ]]  || openssl dhparam -out /etc/openvpn/dh.pem 2048
+    [[ -f /etc/openvpn/key.pem ]] || openssl genrsa -out /etc/openvpn/key.pem 2048
+  else
+    log_info "Using elliptic curve crypto (P-384)..."
+    [[ -f /etc/openvpn/key.pem ]] || openssl ecparam -name secp384r1 -genkey \
+      -noout -out /etc/openvpn/key.pem
   fi
   chmod 600 /etc/openvpn/key.pem
   [[ -f /etc/openvpn/csr.pem ]]  || openssl req -new -key /etc/openvpn/key.pem \
@@ -938,10 +947,19 @@ configure_openvpn() {
   [[ -f /etc/openvpn/cert.pem ]] || openssl x509 -req -in /etc/openvpn/csr.pem \
     -out /etc/openvpn/cert.pem -signkey /etc/openvpn/key.pem -days 3650
 
+  # Build DH section for client config — EC uses no DH
+  local _dh_client_block=""
+  local _dh_server_line="dh none"
+  if [[ "${USE_LEGACY_RSA}" -eq 1 ]]; then
+    _dh_client_block="<dh>
+$(cat /etc/openvpn/dh.pem)
+</dh>"
+    _dh_server_line="dh dh.pem"
+  fi
+
   cat > /root/client.ovpn <<EOFCLIENT
 client
 nobind
-comp-lzo
 dev tun
 <key>
 $(cat /etc/openvpn/key.pem)
@@ -952,9 +970,7 @@ $(cat /etc/openvpn/cert.pem)
 <ca>
 $(cat /etc/openvpn/cert.pem)
 </ca>
-<dh>
-$(cat /etc/openvpn/dh.pem)
-</dh>
+${_dh_client_block}
 <connection>
 remote ${_my_ip} 1194 udp
 </connection>
@@ -964,11 +980,10 @@ EOFCLIENT
 server 172.16.253.0 255.255.255.0
 verb 3
 duplicate-cn
-comp-lzo
 key key.pem
 ca cert.pem
 cert cert.pem
-dh dh.pem
+${_dh_server_line}
 keepalive 10 60
 persist-key
 persist-tun
@@ -1243,7 +1258,7 @@ print_summary() {
   fi
 
   if [[ ${#WARNINGS[@]} -gt 0 ]]; then
-    printf "  %s%sAction Required%s\n" "${YELLOW}" "${_invoker}" "${NC}"
+    printf "  %s%sAction Required%s\n" "${YELLOW}" "${BOLD}" "${NC}"
     echo "  ##################################"
     for _warning in "${WARNINGS[@]}"; do
       printf "  %s!%s %s\n" "${YELLOW}" "${NC}" "${_warning}"
