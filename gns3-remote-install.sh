@@ -377,17 +377,14 @@ get_lan_ip() {
 # Generate a readable one-time passphrase: XXXX-XXXX-####
 generate_passphrase() {
   local _hex
-  _hex=$(openssl rand -hex 6)
-  printf "%s-%s-%s" \
-    "${_hex:0:4}" "${_hex:4:4}" "${_hex:8:4}" | tr 'a-f' 'A-F'
+  _hex=$(openssl rand -hex 4)
+  printf "%s-%s" "${_hex:0:4}" "${_hex:4:4}" | tr 'a-f' 'A-F'
 }
 
 # Encrypt a file with a passphrase, output .enc alongside original
 encrypted_copy() {
-	local _src="$1" _dst="$2" _pass="$3"
-	openssl enc -aes-256-cbc -pbkdf2 -iter 15000 -salt \
-		-pass "pass:${_pass}" -a \
-		-in "${_src}" -out "${_dst}"
+  local _src="$1" _dst="$2" _pass="$3"
+  openssl aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:${_pass}" -a -in "${_src}" -out "${_dst}"
 }
 
 enable_ip_forwarding() {
@@ -490,22 +487,22 @@ setup_config_server() {
 	fi
 
 	if [[ "${WITH_OPENVPN}" -eq 1 && -f /root/client.ovpn ]]; then
-		_has_vpn_configs=1
-		if [[ "${UNSAFE_CONFIGS}" -eq 1 ]]; then
-			cp /root/client.ovpn "${_serve_path}/$(hostname).ovpn"
-		else
-			encrypted_copy /root/client.ovpn "${_serve_path}/$(hostname).ovpn.enc" "${_conf_passphrase}"
-		fi
-	fi
-
-	if [[ "${WITH_WIREGUARD}" -eq 1 && -f /etc/wireguard/client1.conf ]]; then
-		_has_vpn_configs=1
-		if [[ "${UNSAFE_CONFIGS}" -eq 1 ]]; then
-			cp /etc/wireguard/client1.conf "${_serve_path}/wg-client1.conf"
-		else
-			encrypted_copy /etc/wireguard/client1.conf "${_serve_path}/wg-client1.conf.enc" "${_conf_passphrase}"
-		fi
-	fi
+	    _has_vpn_configs=1
+	    if [[ "${UNSAFE_CONFIGS}" -eq 1 ]]; then
+	      cp /root/client.ovpn "${_serve_path}/o"
+	    else
+	      encrypted_copy /root/client.ovpn "${_serve_path}/o" "${_conf_passphrase}"
+	    fi
+	  fi
+	
+	  if [[ "${WITH_WIREGUARD}" -eq 1 && -f /etc/wireguard/client1.conf ]]; then
+	    _has_vpn_configs=1
+	    if [[ "${UNSAFE_CONFIGS}" -eq 1 ]]; then
+	      cp /etc/wireguard/client1.conf "${_serve_path}/w"
+	    else
+	      encrypted_copy /etc/wireguard/client1.conf "${_serve_path}/w" "${_conf_passphrase}"
+	    fi
+  	fi
 
 	# Stash passphrase for summary banner
 	if [[ -n "${_conf_passphrase}" ]]; then
@@ -1194,20 +1191,16 @@ print_summary() {
 		echo "  ##################################"
 
 		if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
-			printf "  ${CYAN}WireGuard:${NC}\n"
-			echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/wg-client1.conf.enc \\"
-			echo "    | openssl enc -d -aes-256-cbc -pbkdf2 -iter 15000 -salt \\"
-			echo "    -pass pass:${_pass} -a > wg-client1.conf"
-			echo ""
-		fi
-
-		if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
-			printf "  ${CYAN}OpenVPN:${NC}\n"
-			echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/$(hostname).ovpn.enc \\"
-			echo "    | openssl enc -d -aes-256-cbc -pbkdf2 -iter 15000 -salt \\"
-			echo "    -pass pass:${_pass} -a > $(hostname).ovpn"
-			echo ""
-		fi
+	      printf "  ${CYAN}WireGuard:${NC}\n"
+	      echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/w | openssl aes-256-cbc -d -pbkdf2 -iter 10000 -pass pass:${_pass} -a > wg-client1.conf"
+	      echo ""
+	    fi
+	
+	    if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
+	      printf "  ${CYAN}OpenVPN:${NC}\n"
+	      echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/o | openssl aes-256-cbc -d -pbkdf2 -iter 10000 -pass pass:${_pass} -a > $(hostname).ovpn"
+	      echo ""
+	    fi
 	fi
 
 	if [[ "${DISABLE_KVM}" -eq 1 ]]; then
