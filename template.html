@@ -146,13 +146,13 @@
         if (D.with_wireguard) {
           h += `<p><strong>WireGuard:</strong> ${D.public_ip}:51820</p>`;
           h += `<p>Tunnel: <code>172.16.254.1:3080</code></p>`;
-          h += `<a class="dl" href="${D.serve_slug}/wg-client1.conf${ext}">Download WireGuard Config${ext ? ' (encrypted)' : ''}</a> `;
+          h += `<a class="dl" href="${D.serve_slug}/w">Download WireGuard Config${ext ? ' (encrypted)' : ''}</a> `;
         }
 
         if (D.with_openvpn) {
           h += `<p><strong>OpenVPN:</strong> ${D.public_ip}:1194/udp</p>`;
           h += `<p>Tunnel: <code>172.16.253.1:3080</code></p>`;
-          h += `<a class="dl" href="${D.serve_slug}/${D.hostname}.ovpn${ext}">Download OpenVPN Config${ext ? ' (encrypted)' : ''}</a> `;
+          h += `<a class="dl" href="${D.serve_slug}/o">Download OpenVPN Config${ext ? ' (encrypted)' : ''}</a> `;
         }
 
         if (!D.unsafe_configs) {
