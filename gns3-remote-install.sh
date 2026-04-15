@@ -458,7 +458,7 @@ setup_config_server() {
 	[[ -d "${CONFIG_SERVE_DIR}" ]] && rm -rf "${CONFIG_SERVE_DIR}" && log_info "Removed config server directory" || log_info "No config server directory"
 
 	local _serve_slug _serve_path _lan_ip _public_ip _gns3_bin _gns3_ver
-	_serve_slug=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6)
+	_serve_slug=$(openssl rand -hex 3)
 	_serve_path="${CONFIG_SERVE_DIR}/${_serve_slug}"
 	log_info "Creating config server directory: ${_serve_path}"
 	mkdir -p "${_serve_path}"
