@@ -376,12 +376,10 @@ get_lan_ip() {
 
 # Generate a readable one-time passphrase: XXXX-XXXX-####
 generate_passphrase() {
-	local _chars="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	local _nums="0123456789"
-	printf "%s-%s-%s" \
-		"$(LC_ALL=C tr -dc "${_chars}" </dev/urandom | head -c 4)" \
-		"$(LC_ALL=C tr -dc "${_chars}" </dev/urandom | head -c 4)" \
-		"$(LC_ALL=C tr -dc "${_nums}" </dev/urandom | head -c 4)"
+  local _hex
+  _hex=$(openssl rand -hex 6)
+  printf "%s-%s-%s" \
+    "${_hex:0:4}" "${_hex:4:4}" "${_hex:8:4}" | tr 'a-f' 'A-F'
 }
 
 # Encrypt a file with a passphrase, output .enc alongside original
@@ -473,8 +471,8 @@ setup_config_server() {
 	[[ -x "${GNS3_VENV}/bin/gns3server" ]] && _gns3_bin="${GNS3_VENV}/bin/gns3server"
 
 	# Extract exact semantic version, fallback to "unknown"
-	_gns3_ver=$("${_gns3_bin}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-	[[ -z "${_gns3_ver}" ]] && _gns3_ver="unknown"
+	_gns3_ver=$("${_gns3_bin}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+  	[[ -z "${_gns3_ver}" ]] && _gns3_ver="unknown"
 
 	# ## VPN config files (encrypted by default) ################################
 	local _conf_passphrase=""
