@@ -47,8 +47,7 @@
       code,
       .mono {
         font-family: "Fira Mono", monospace;
-        font-size: 1.4em;
-        background: #1a1a1a;
+        font-size: 1.4rem;
         padding: 2px 6px;
         border-radius: 3px;
       }
@@ -144,14 +143,14 @@
         const ext = D.unsafe_configs ? '' : '.enc';
 
         if (D.with_wireguard) {
-          h += `<p><strong>WireGuard:</strong> ${D.public_ip}:51820</p>`;
-          h += `<p>Tunnel: <code>172.16.254.1:3080</code></p>`;
+          h += `<p><strong>WireGuard:</strong> <code>${D.public_ip}:51820</code></p>`;
+          h += `<p><strong>Tunnel:</strong> <code>172.16.254.1:3080</code></p>`;
           h += `<a class="dl" href="${D.serve_slug}/w">Download WireGuard Config${ext ? ' (encrypted)' : ''}</a> `;
         }
 
         if (D.with_openvpn) {
-          h += `<p><strong>OpenVPN:</strong> ${D.public_ip}:1194/udp</p>`;
-          h += `<p>Tunnel: <code>172.16.253.1:3080</code></p>`;
+          h += `<p><strong>OpenVPN:</strong> <code>${D.public_ip}:1194/udp</code></p>`;
+          h += `<p><strong>Tunnel:</strong> <code>172.16.253.1:3080</code></p>`;
           h += `<a class="dl" href="${D.serve_slug}/o">Download OpenVPN Config${ext ? ' (encrypted)' : ''}</a> `;
         }
 
