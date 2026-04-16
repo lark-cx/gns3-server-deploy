@@ -806,9 +806,6 @@ configure_gns3() {
 	log_info "Writing GNS3 server configuration..."
 
 	local _listen_host="0.0.0.0"
-	if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
-		_listen_host="172.16.253.1"
-	fi
 
 	local _hw_accel="True"
 	if [[ "${DISABLE_KVM}" -eq 1 ]]; then
