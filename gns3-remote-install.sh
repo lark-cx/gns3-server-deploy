@@ -909,7 +909,10 @@ configure_openvpn() {
 	[[ -f /etc/openvpn/csr.pem ]] || openssl req -new -key /etc/openvpn/key.pem \
 		-out /etc/openvpn/csr.pem -subj /CN=OpenVPN/
 	[[ -f /etc/openvpn/cert.pem ]] || openssl x509 -req -in /etc/openvpn/csr.pem \
-		-out /etc/openvpn/cert.pem -signkey /etc/openvpn/key.pem -days 3650
+		-out /etc/openvpn/cert.pem -signkey /etc/openvpn/key.pem -days 3650  &> /dev/null
+
+	### TODO
+	### Confirm above are all actually created as we go
 
 	local _dh_client_block=""
 	local _dh_server_line="dh none"
@@ -1142,7 +1145,7 @@ print_summary() {
 	echo ""
 	printf "${GREEN}${BOLD}"
 	echo "  GNS3 Server Install Complete"
-	printf "%s" "${NC}"
+	printf "${NC}"
 	echo "  ##################################"
 	echo ""
 	printf "  Server: http://%s:3080\n" "${_lan_ip}"
@@ -1172,10 +1175,9 @@ print_summary() {
 	if [[ -f "${CONFIG_SERVE_DIR}/.serve_slug" ]]; then
 		local _serve_slug
 		_serve_slug=$(cat "${CONFIG_SERVE_DIR}/.serve_slug")
-		echo "  Landing page:"
-		echo "  http://${_lan_ip}:${CONFIG_SERVE_PORT}/"
-		printf "  ${YELLOW}Expires in ${CONFIG_SERVE_HOURS}h${NC}\n"
-		echo ""
+		printf "  Landing page:\n"
+		printf "  http://%s:%s/" "${_lan_ip}" "${CONFIG_SERVE_PORT}"
+		printf "  ${YELLOW}Expires in %sh${NC}\n\n" "${CONFIG_SERVE_HOURS}"
 	fi
 
 	# Encrypted config download commands
@@ -1189,13 +1191,13 @@ print_summary() {
 
 		if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
 	      printf "  ${CYAN}WireGuard:${NC}\n"
-	      echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/w | openssl aes-256-cbc -d -pbkdf2 -iter 10000 -pass pass:${_pass} -a > wg-client1.conf"
+	      echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/w | openssl aes-256-cbc -d -pbkdf2 -pass pass:${_pass} -a > wg.conf"
 	      echo ""
 	    fi
 	
 	    if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
 	      printf "  ${CYAN}OpenVPN:${NC}\n"
-	      echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/o | openssl aes-256-cbc -d -pbkdf2 -iter 10000 -pass pass:${_pass} -a > $(hostname).ovpn"
+	      echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/o | openssl aes-256-cbc -d -pbkdf2 -pass pass:${_pass} -a > conf.ovpn"
 	      echo ""
 	    fi
 	fi
