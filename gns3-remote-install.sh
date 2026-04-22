@@ -908,7 +908,15 @@ propagate_groups_to_invoker() {
   fi
 }
 
+gns3_repo_present() {
+  grep -rq "^deb.*ppa.launchpad.net/gns3/${REPOSITORY}" /etc/apt/sources.list.d/ 2>/dev/null
+}
+
 add_gns3_repository() {
+  if gns3_repo_present; then
+    log_info "GNS3 PPA already configured"
+    return
+  fi
   log_info "Adding GNS3 PPA: ppa:gns3/${REPOSITORY}"
   apt-add-repository -y "ppa:gns3/${REPOSITORY}" >/dev/null
   log_ok "GNS3 repository added"
@@ -1063,9 +1071,6 @@ configure_openvpn() {
 
   local _hostname
   _hostname=$(hostname)
-
-  ensure_directory /dev/net
-  [[ -c /dev/net/tun ]] || mknod /dev/net/tun c 10 200
 
   log_info "Generating OpenVPN keys..."
   ensure_directory "${OVPN_CONF_DIR}" root 755
