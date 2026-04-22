@@ -946,21 +946,34 @@ EOF
   log_ok "Docker repository configured"
 }
 
-install_packages() {
-  log_info "Updating package index..."
-  apt_retry update -qq
+# Do we need to run install?
+needs_install() {
+  local _pkg
+  for _pkg in "${REQUIRED_PKGS[@]}"; do
+    # dpkg-query is faster than apt-cache for this
+    if ! dpkg-query -W -f='${Status}' "${_pkg}" 2>/dev/null | grep -q "install ok installed"; then
+      return 0  # at least one package needs install
+    fi
+  done
+  return 1  # everything installed
+}
 
-  if [[ ${NO_SYSTEM_UPGRADE} -eq 0 ]]; then
-    log_info "Upgrading system packages (this may take a while)..."
+install_packages() {
+  if [[ "${NO_SYSTEM_UPGRADE}" -eq 0 ]]; then
+    log_info "Upgrading system packages..."
     apt_retry upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
     log_ok "System upgraded"
   else
-    log_info "Skipping system upgrade (--without-system-upgrade)"
+    log_info "Skipping system upgrade"
   fi
 
-  log_info "Installing ${#REQUIRED_PKGS[@]} packages..."
-  NEEDRESTART_MODE=a apt_retry install -y "${REQUIRED_PKGS[@]}"
-  log_ok "All packages installed"
+  if needs_install; then
+    log_info "Installing required packages..."
+    NEEDRESTART_MODE=a apt_retry install -y "${REQUIRED_PKGS[@]}"
+    log_ok "All packages installed"
+  else
+    log_ok "All required packages already installed"
+  fi
 }
 
 ### GNS3 server configuration #####################################
