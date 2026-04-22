@@ -24,7 +24,7 @@
 #   --custom-repository REPO  Use a custom GNS3 PPA name
 #   -h, --help                Show this help
 
-#  Constants ################################################################
+### Constants ################################################################
 
 readonly REPO_BASE_URL="https://raw.githubusercontent.com/lark-cx/gns3-server-deploy/refs/heads/main/"
 readonly REPO_LANDING_HTML="template.html"
@@ -33,12 +33,21 @@ readonly DOCKER_KEYRING="/etc/apt/keyrings/docker.asc"
 readonly GNS3_USER="gns3"
 readonly GNS3_HOME="/opt/gns3"
 readonly GNS3_CONF_DIR="/etc/gns3"
+readonly GNS3_PORT=3080
 readonly GNS3_SERVICE_FILE="/lib/systemd/system/gns3.service"
 readonly GNS3_VENV="/usr/share/gns3/gns3-server"
 readonly CONFIG_SERVE_PORT=8003
 readonly CONFIG_SERVE_DIR="/var/lib/gns3-config-serve"
 readonly CONFIG_SERVE_HOURS=2
 readonly DEPLOY_MARKER="# deployed by gns3-remote-install-redux"
+readonly DEPLOY_DIR="/root/.gns3-deploy"
+
+### VPN Constants #############################################################
+
+readonly OVPN_CONF_DIR="/etc/openvpn"
+readonly OVPN_PORT=1194
+readonly WG_CONF_DIR="/etc/wireguard"
+readonly WG_PORT=51820
 
 ### Colors ####################################################################
 
@@ -51,29 +60,29 @@ readonly NC='\033[0m'
 
 ### Logging ##################################################################
 
-log_info() { printf "${CYAN}[INFO]${NC}  %s\n" "$1" >&2; }
-log_ok() { printf "${GREEN}[ OK ]${NC}  %s\n" "$1" >&2; }
-log_warn() { printf "${YELLOW}[WARN]${NC}  %s\n" "$1" >&2; }
-log_error() { printf "${RED}[FAIL]${NC}  %s\n" "$1" >&2; }
+log_info() { printf "${CYAN}[INFO]${NC}  %s\n" "${1}" >&2; }
+log_ok() { printf "${GREEN}[ OK ]${NC}  %s\n" "${1}" >&2; }
+log_warn() { printf "${YELLOW}[WARN]${NC}  %s\n" "${1}" >&2; }
+log_error() { printf "${RED}[FAIL]${NC}  %s\n" "${1}" >&2; }
 log_fatal() {
-	printf "${RED}[FATAL]${NC} %s\n" "$1" >&2
+	printf "${RED}[FATAL]${NC} %s\n" "${1}" >&2
 	exit 1
 }
 
 # Testability wrapper — EUID is readonly in bash, so tests override this function
 is_root() { [[ "${EUID}" -eq 0 ]]; }
-
+s
 # Sticky warnings — collected throughout execution, displayed before summary
 WARNINGS=()
 log_warn_sticky() {
-	log_warn "$1"
-	WARNINGS+=("$1")
+	log_warn "${1}"
+	WARNINGS+=("${1}")
 }
 
 ### Mutable arrays (built up by option flags) ##############################─
 
 REQUIRED_CMDS=(apt apt-add-repository dpkg chown chmod useradd usermod lsmod systemctl ss openssl)
-REQUIRED_PORTS=(3080)
+REQUIRED_PORTS=($GNS3_PORT)
 REQUIRED_GROUPS=(kvm ubridge)
 REQUIRED_MODS=(kvm)
 
@@ -141,7 +150,7 @@ TEMP=$(getopt -o h --long with-openvpn,with-wireguard,with-welcome,without-kvm,w
 eval set -- "${TEMP}"
 
 while true; do
-	case "$1" in
+	case "${1}" in
 	--with-openvpn)
 		WITH_OPENVPN=1
 		shift
@@ -194,19 +203,19 @@ while true; do
 		shift
 		break
 		;;
-	*) log_fatal "Unknown option: $1" ;;
+	*) log_fatal "Unknown option: ${1}" ;;
 	esac
 done
 
 ### Roll up arrays based on flags ##########################################─
 
 if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
-	REQUIRED_PORTS+=(1194)
+	REQUIRED_PORTS+=($OVPN_PORT)
 	REQUIRED_PKGS+=("${PKGS_OPENVPN[@]}")
 fi
 
 if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
-	REQUIRED_PORTS+=(51820)
+	REQUIRED_PORTS+=($WG_PORT)
 	REQUIRED_MODS+=(wireguard)
 	REQUIRED_PKGS+=("${PKGS_WIREGUARD[@]}")
 fi
@@ -221,6 +230,7 @@ fi
 
 if [[ "${WITH_WELCOME}" -eq 1 ]]; then
 	REQUIRED_PKGS+=("${PKGS_WELCOME[@]}")
+	REQUIRED_GROUPS+=(sudo)
 fi
 
 ### Preflight checks ########################################################
@@ -339,7 +349,7 @@ apt_retry() {
 }
 
 ensure_group() {
-	getent group "$1" &>/dev/null || groupadd --system "$1"
+  getent group "${1}" &>/dev/null || groupadd --system "${1}"
 }
 
 detect_invoking_user() {
@@ -383,7 +393,7 @@ generate_passphrase() {
 
 # Encrypt a file with a passphrase, output .enc alongside original
 encrypted_copy() {
-  local _src="$1" _dst="$2" _pass="$3"
+  local _src="${1}" _dst="${2}" _pass="${3}"
   openssl aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:${_pass}" -a -in "${_src}" -out "${_dst}"
 }
 
@@ -428,13 +438,13 @@ apply_sysctl_hardening() {
 
 # Safe and quiet service (re)start - with mulligan
 enable_and_start() {
-	local _svc="$1"
-	systemctl daemon-reload &>/dev/null
+	local _svc="${1}"
+	systemctl daemon-reload &>/dev/null 2>&1
 	systemctl enable "${_svc}" &>/dev/null 2>&1
 	systemctl restart "${_svc}" ||
 		{
 			sleep 3
-			systemctl start "${_svc}"
+			systemctl start "${_svc}" 2>&1
 		} ||
 		true
 }
@@ -445,35 +455,49 @@ setup_config_server() {
 	log_info "Setting up config server (port ${CONFIG_SERVE_PORT}, ${CONFIG_SERVE_HOURS}h TTL)..."
 
 	# Stop existing server if running from a previous install
-	if [[ "$(systemctl is-active gns3-config-serve.service)" == "active" ]]; then
+	if systemctl is-active --quiet gns3-config-serve.service 2>/dev/null; then
 		systemctl stop gns3-config-serve.service 2>/dev/null || true
 		systemctl stop gns3-config-serve-stop.timer 2>/dev/null || true
-	else
-		log_info "gns3 config server not active"
+		log_info "Stopped previous config server"
 	fi
 
-	[[ -d "${CONFIG_SERVE_DIR}" ]] && rm -rf "${CONFIG_SERVE_DIR}" && log_info "Removed config server directory" || log_info "No config server directory"
+	# Clean previous serve directory (public-facing only)
+	[[ -d "${CONFIG_SERVE_DIR}" ]] && rm -rf "${CONFIG_SERVE_DIR}"
 
-	local _serve_slug _serve_path _lan_ip _public_ip _gns3_bin _gns3_ver
-	_serve_slug=$(openssl rand -hex 3)
-	_serve_path="${CONFIG_SERVE_DIR}/${_serve_slug}"
-	log_info "Creating config server directory: ${_serve_path}"
+	# Ensure deploy directory exists for secrets
+  # CONFIRM_ME
+  # Chained together and log success of creation/changing perms
+  # Reasonable?
+	mkdir -p "${DEPLOY_DIR}" && chmod 700 "${DEPLOY_DIR}" && log_info "Ensured deploy directory exists."
+
+	# Persist slug across re-runs so URL stays stable
+	local _serve_slug
+	if [[ -f "${DEPLOY_DIR}/serve_slug" ]]; then
+		_serve_slug=$(cat "${DEPLOY_DIR}/serve_slug")
+		log_info "Reusing existing serve slug: ${_serve_slug}"
+	else
+		_serve_slug=$(openssl rand -hex 3)
+		echo "${_serve_slug}" > "${DEPLOY_DIR}/serve_slug" && \
+		  chmod 600 "${DEPLOY_DIR}/serve_slug" && \
+		  log_info "Created serve slug file: ${DEPLOY_DIR}/serve_slug"
+	fi
+
+	local _serve_path="${CONFIG_SERVE_DIR}/${_serve_slug}"
 	mkdir -p "${_serve_path}"
+	log_info "Config serve path: ${_serve_path}"
 
-	echo "${_serve_slug}" >"${CONFIG_SERVE_DIR}/.serve_slug"
-	log_info "${_serve_path} ${_serve_slug}"
+	local _lan_ip _public_ip _gns3_bin _gns3_ver
 	_lan_ip=$(get_lan_ip)
 	_public_ip=$(get_public_ip)
 	_gns3_bin="/usr/bin/gns3server"
 	[[ -x "${GNS3_VENV}/bin/gns3server" ]] && _gns3_bin="${GNS3_VENV}/bin/gns3server"
 
 	# Extract exact semantic version, fallback to "unknown"
-	_gns3_ver=$("${_gns3_bin}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-  	[[ -z "${_gns3_ver}" ]] && _gns3_ver="unknown"
+	_gns3_ver=$("${_gns3_bin}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+	[[ -z "${_gns3_ver}" ]] && _gns3_ver="unknown"
 
 	# ## VPN config files (encrypted by default) ################################
 	local _conf_passphrase=""
-	local _has_vpn_configs=0
 
 	if [[ "${WITH_OPENVPN}" -eq 1 || "${WITH_WIREGUARD}" -eq 1 ]]; then
 		# Fatal if we can't determine public IP for VPN configs
@@ -482,33 +506,38 @@ setup_config_server() {
 		fi
 
 		if [[ "${UNSAFE_CONFIGS}" -eq 0 ]]; then
-			_conf_passphrase=$(generate_passphrase)
+			# Persist passphrase across re-runs
+			if [[ -f "${DEPLOY_DIR}/passphrase" ]]; then
+				_conf_passphrase=$(cat "${DEPLOY_DIR}/passphrase")
+				log_info "Reusing existing config passphrase from: ${DEPLOY_DIR}/passphrase"
+			else
+				_conf_passphrase=$(generate_passphrase)
+				echo "${_conf_passphrase}" > "${DEPLOY_DIR}/passphrase" && \
+				  chmod 600 "${DEPLOY_DIR}/passphrase" && \
+			  	log_info "Created new passphrase file at: ${DEPLOY_DIR}/passphrase"
+			fi
 		fi
 	fi
 
 	if [[ "${WITH_OPENVPN}" -eq 1 && -f /root/client.ovpn ]]; then
-	    _has_vpn_configs=1
-	    if [[ "${UNSAFE_CONFIGS}" -eq 1 ]]; then
-	      cp /root/client.ovpn "${_serve_path}/o"
-	    else
-	      encrypted_copy /root/client.ovpn "${_serve_path}/o" "${_conf_passphrase}"
-	    fi
-	  fi
-	
-	  if [[ "${WITH_WIREGUARD}" -eq 1 && -f /etc/wireguard/client1.conf ]]; then
-	    _has_vpn_configs=1
-	    if [[ "${UNSAFE_CONFIGS}" -eq 1 ]]; then
-	      cp /etc/wireguard/client1.conf "${_serve_path}/w"
-	    else
-	      encrypted_copy /etc/wireguard/client1.conf "${_serve_path}/w" "${_conf_passphrase}"
-	    fi
-  	fi
-
-	# Stash passphrase for summary banner
-	if [[ -n "${_conf_passphrase}" ]]; then
-		echo "${_conf_passphrase}" >"${CONFIG_SERVE_DIR}/.passphrase"
-		chmod 600 "${CONFIG_SERVE_DIR}/.passphrase"
+		if [[ "${UNSAFE_CONFIGS}" -eq 1 ]]; then
+			cp /root/client.ovpn "${_serve_path}/o"
+		else
+			encrypted_copy /root/client.ovpn "${_serve_path}/o" "${_conf_passphrase}"
+		fi
 	fi
+
+	if [[ "${WITH_WIREGUARD}" -eq 1 && -f "${WG_CONF_DIR}/client1.conf" ]]; then
+		if [[ "${UNSAFE_CONFIGS}" -eq 1 ]]; then
+			cp "${WG_CONF_DIR}/client1.conf" "${_serve_path}/w"
+		else
+			encrypted_copy "${WG_CONF_DIR}/client1.conf" "${_serve_path}/w" "${_conf_passphrase}"
+		fi
+	fi
+
+	# Also stash client configs in deploy dir for safekeeping
+	[[ -f /root/client.ovpn ]] && cp /root/client.ovpn "${DEPLOY_DIR}/client.ovpn"
+	[[ -f "${WG_CONF_DIR}/client1.conf" ]] && cp "${WG_CONF_DIR}/client1.conf" "${DEPLOY_DIR}/wg-client1.conf"
 
 	# ## Landing page ##########################################################
 
@@ -556,6 +585,7 @@ setup_config_server() {
 		sed -i "s|{{PUBLIC_IP}}|${_public_ip}|g" "${_template_dst}"
 		sed -i "s|{{HOSTNAME}}|$(hostname)|g" "${_template_dst}"
 		sed -i "s|{{GNS3_VERSION}}|${_gns3_ver}|g" "${_template_dst}"
+		sed -i "s|{{GNS3_PORT}}|${GNS3_PORT}|g" "${_template_dst}"
 		sed -i "s|{{WITH_OPENVPN}}|${WITH_OPENVPN}|g" "${_template_dst}"
 		sed -i "s|{{WITH_WIREGUARD}}|${WITH_WIREGUARD}|g" "${_template_dst}"
 		sed -i "s|{{WITH_DOCKER}}|${WITH_DOCKER}|g" "${_template_dst}"
@@ -565,6 +595,8 @@ setup_config_server() {
 		sed -i "s|{{SERVE_HOURS}}|${CONFIG_SERVE_HOURS}|g" "${_template_dst}"
 		sed -i "s|{{SERVE_PORT}}|${CONFIG_SERVE_PORT}|g" "${_template_dst}"
 		sed -i "s|{{WARNINGS_JSON}}|${_warnings_json}|g" "${_template_dst}"
+		sed -i "s|{{OVPN_PORT}}|${OVPN_PORT}|g" "${_template_dst}"
+		sed -i "s|{{WG_PORT}}|${WG_PORT}|g" "${_template_dst}"
 
 		log_ok "Landing page generated"
 	fi
@@ -609,9 +641,11 @@ ExecStart=/bin/systemctl stop gns3-config-serve.service
 ExecStart=/bin/systemctl disable gns3-config-serve.service
 ExecStart=/bin/rm -rf ${CONFIG_SERVE_DIR}
 ExecStart=/bin/systemctl disable gns3-config-serve-stop.timer
+ExecStart=/usr/sbin/ufw delete allow ${CONFIG_SERVE_PORT}/tcp
 EOF
 
 	enable_and_start gns3-config-serve.service
+	enable_and_start gns3-config-serve-stop.timer
 
 	log_ok "Config server live on port ${CONFIG_SERVE_PORT} (auto-stops in ${CONFIG_SERVE_HOURS}h)"
 
@@ -673,7 +707,7 @@ configure_firewall() {
 
 		# VPN ports: allow from anywhere, both TCP and UDP
 		case "${_port}" in
-		1194 | 51820)
+		$OVPN_PORT | $WG_PORT)
 			ufw allow "${_port}"/tcp comment "GNS3 - ${_status} (VPN)" >/dev/null 2>&1
 			ufw allow "${_port}"/udp comment "GNS3 - ${_status} (VPN)" >/dev/null 2>&1
 			continue
@@ -818,7 +852,7 @@ configure_gns3() {
 ${DEPLOY_MARKER}
 [Server]
 host = ${_listen_host}
-port = 3080
+port = ${GNS3_PORT}
 images_path = ${GNS3_HOME}/images
 projects_path = ${GNS3_HOME}/projects
 appliances_path = ${GNS3_HOME}/appliances
@@ -895,21 +929,21 @@ configure_openvpn() {
 	[[ -c /dev/net/tun ]] || mknod /dev/net/tun c 10 200
 
 	log_info "Generating OpenVPN keys..."
-	mkdir -p /etc/openvpn
+	mkdir -p "${OVPN_CONF_DIR}"
 	if [[ "${USE_LEGACY_RSA}" -eq 1 ]]; then
 		log_info "Using legacy RSA crypto (DH params may take a minute)..."
-		[[ -f /etc/openvpn/dh.pem ]] || openssl dhparam -out /etc/openvpn/dh.pem 2048
-		[[ -f /etc/openvpn/key.pem ]] || openssl genrsa -out /etc/openvpn/key.pem 2048
+		[[ -f "${OVPN_CONF_DIR}/dh.pem" ]] || openssl dhparam -out "${OVPN_CONF_DIR}/dh.pem" 2048
+		[[ -f "${OVPN_CONF_DIR}/key.pem" ]] || openssl genrsa -out "${OVPN_CONF_DIR}/key.pem" 2048
 	else
 		log_info "Using elliptic curve crypto (P-384)..."
-		[[ -f /etc/openvpn/key.pem ]] || openssl ecparam -name secp384r1 -genkey \
-			-noout -out /etc/openvpn/key.pem
+		[[ -f "${OVPN_CONF_DIR}/key.pem" ]] || openssl ecparam -name secp384r1 -genkey \
+			-noout -out "${OVPN_CONF_DIR}/key.pem"
 	fi
-	chmod 600 /etc/openvpn/key.pem
-	[[ -f /etc/openvpn/csr.pem ]] || openssl req -new -key /etc/openvpn/key.pem \
-		-out /etc/openvpn/csr.pem -subj /CN=OpenVPN/
-	[[ -f /etc/openvpn/cert.pem ]] || openssl x509 -req -in /etc/openvpn/csr.pem \
-		-out /etc/openvpn/cert.pem -signkey /etc/openvpn/key.pem -days 3650  &> /dev/null
+	chmod 600 "${OVPN_CONF_DIR}/key.pem"
+	[[ -f "${OVPN_CONF_DIR}/csr.pem" ]] || openssl req -new -key "${OVPN_CONF_DIR}/key.pem" \
+		-out "${OVPN_CONF_DIR}/csr.pem" -subj /CN=OpenVPN/
+	[[ -f "${OVPN_CONF_DIR}/cert.pem" ]] || openssl x509 -req -in "${OVPN_CONF_DIR}/csr.pem" \
+		-out "${OVPN_CONF_DIR}/cert.pem" -signkey "${OVPN_CONF_DIR}/key.pem" -days 3650  &> /dev/null
 
 	### TODO
 	### Confirm above are all actually created as we go
@@ -918,7 +952,7 @@ configure_openvpn() {
 	local _dh_server_line="dh none"
 	if [[ "${USE_LEGACY_RSA}" -eq 1 ]]; then
 		_dh_client_block="<dh>
-$(cat /etc/openvpn/dh.pem)
+$(cat "${OVPN_CONF_DIR}/dh.pem")
 </dh>"
 		_dh_server_line="dh dh.pem"
 	fi
@@ -928,21 +962,21 @@ client
 nobind
 dev tun
 <key>
-$(cat /etc/openvpn/key.pem)
+$(cat "${OVPN_CONF_DIR}/key.pem")
 </key>
 <cert>
-$(cat /etc/openvpn/cert.pem)
+$(cat "${OVPN_CONF_DIR}/cert.pem")
 </cert>
 <ca>
-$(cat /etc/openvpn/cert.pem)
+$(cat "${OVPN_CONF_DIR}/cert.pem")
 </ca>
 ${_dh_client_block}
 <connection>
-remote ${_my_ip} 1194 udp
+remote ${_my_ip} ${OVPN_PORT} udp
 </connection>
 EOFCLIENT
 
-	cat >/etc/openvpn/udp1194.conf <<EOFUDP
+	cat > "${OVPN_CONF_DIR}/udp${OVPN_PORT}.conf" <<EOFUDP
 server 172.16.253.0 255.255.255.0
 verb 3
 duplicate-cn
@@ -954,10 +988,10 @@ keepalive 10 60
 persist-key
 persist-tun
 proto udp
-port 1194
-dev tun1194
-status openvpn-status-1194.log
-log-append /var/log/openvpn-udp1194.log
+port  ${OVPN_PORT}
+dev tun${OVPN_PORT}
+status openvpn-status-${OVPN_PORT}.log
+log-append /var/log/openvpn-udp${OVPN_PORT}.log
 EOFUDP
 
 	# Restart with retry for failures (rare)
@@ -976,35 +1010,54 @@ configure_wireguard() {
 		log_fatal "Could not determine public IP for WireGuard configuration."
 	fi
 
-	mkdir -p /etc/wireguard
-	chmod 700 /etc/wireguard
 
-	if [[ ! -f /etc/wireguard/server.key ]]; then
+  # CONFIRM_ME
+  # Chained together and log success of creation/changing perms
+  # Reasonable?
+	mkdir -p "${WG_CONF_DIR}" && \
+	chmod 700 "${WG_CONF_DIR}" && \
+	log_ok "Created WireGuard configuration directory."
+
+  # CONFIRM_ME
+  # Create key then log, or make sure permissions are good, and log
+  # Reasonable?
+	if [[ ! -f "${WG_CONF_DIR}/server.key" ]]; then
 		(
 			umask 077
-			wg genkey | tee /etc/wireguard/server.key | wg pubkey >/etc/wireguard/server.pub
+			wg genkey | tee "${WG_CONF_DIR}/server.key" | wg pubkey >"${WG_CONF_DIR}/server.pub"
+			[[ -f "${WG_CONF_DIR}/server.key" ]] && log_ok "Created WireGuard server key."
 		)
-	fi
+	else
+	    chmod 600 "${WG_CONF_DIR}/server.key" ]] && log_ok "Verified WireGuard server key permissions."
+  fi
 
 	local _server_privkey _server_pubkey
-	_server_privkey=$(cat /etc/wireguard/server.key)
-	_server_pubkey=$(cat /etc/wireguard/server.pub)
+	_server_privkey=$(cat "${WG_CONF_DIR}/server.key")
+	_server_pubkey=$(cat "${WG_CONF_DIR}/server.pub")
 
-	if [[ ! -f /etc/wireguard/client1.key ]]; then
+
+  # CONFIRM_ME
+  # Create key and log, or make sure permissions are good, and log
+  # Reasonable?
+	if [[ ! -f "${WG_CONF_DIR}/client1.key" ]]; then
 		(
 			umask 077
-			wg genkey | tee /etc/wireguard/client1.key | wg pubkey >/etc/wireguard/client1.pub
+			wg genkey | tee "${WG_CONF_DIR}/client1.key" | wg pubkey >"${WG_CONF_DIR}/client1.pub"
+			[[ -f "${WG_CONF_DIR}/client1.key" ]] && log_ok "Created WireGuard client key."
 		)
-	fi
+	else
+	    chmod 600 "${WG_CONF_DIR}/client1.key" ]] && log_ok "Verified WireGuard client key permissions."
+  fi
+
 
 	local _client_privkey _client_pubkey
-	_client_privkey=$(cat /etc/wireguard/client1.key)
-	_client_pubkey=$(cat /etc/wireguard/client1.pub)
+	_client_privkey=$(cat "${WG_CONF_DIR}/client1.key")
+	_client_pubkey=$(cat "${WG_CONF_DIR}/client1.pub")
 
-	cat >/etc/wireguard/wg0.conf <<EOF
+	cat >"${WG_CONF_DIR}/wg0.conf" <<EOF
 [Interface]
 Address = 172.16.254.1/24
-ListenPort = 51820
+ListenPort = ${WG_PORT}
 PrivateKey = ${_server_privkey}
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
@@ -1015,9 +1068,9 @@ PublicKey = ${_client_pubkey}
 AllowedIPs = 172.16.254.2/32
 EOF
 
-	chmod 600 /etc/wireguard/wg0.conf
+	chmod 600 "${WG_CONF_DIR}/wg0.conf" && log_info "Verified WireGuard server config permissions."
 
-	cat >/etc/wireguard/client1.conf <<EOF
+	cat >"${WG_CONF_DIR}/client1.conf" <<EOF
 [Interface]
 Address = 172.16.254.2/24
 PrivateKey = ${_client_privkey}
@@ -1025,7 +1078,7 @@ DNS = 1.1.1.1
 
 [Peer]
 PublicKey = ${_server_pubkey}
-Endpoint = ${_my_ip}:51820
+Endpoint = ${_my_ip}:${WG_PORT}
 AllowedIPs = 172.16.253.0/24, 172.16.254.0/24
 PersistentKeepalive = 25
 EOF
@@ -1047,10 +1100,14 @@ gns3   ALL = (ALL) NOPASSWD: /usr/sbin/reboot
 EOF
 	chmod 440 /etc/sudoers.d/gns3
 
+  # CONFIRM_ME
+  # Instead of 3 sequential commands, download then log; chmod+chown then log
+  # Reasonable?
 	curl -fsSL https://raw.githubusercontent.com/GNS3/gns3-server/master/scripts/welcome.py \
-		-o /usr/local/bin/welcome.py
-	chmod 755 /usr/local/bin/welcome.py
-	chown "${GNS3_USER}:${GNS3_USER}" /usr/local/bin/welcome.py
+		-o /usr/local/bin/welcome.py && log_info "Downloaded welcome.py from GNS3 repo."
+	chmod 755 /usr/local/bin/welcome.py && \
+	chown "${GNS3_USER}:${GNS3_USER}" /usr/local/bin/welcome.py && \
+	log_info "Ensured ownership and permissions on welcome.py"
 
 	mkdir -p /etc/systemd/system/getty@tty1.service.d
 	cat >/etc/systemd/system/getty@tty1.service.d/override.conf <<'EOF'
@@ -1065,7 +1122,8 @@ EOF
 
 	echo "gns3:gns3" | chpasswd
 	usermod --shell /bin/bash "${GNS3_USER}"
-	usermod -aG sudo "${GNS3_USER}"
+	#CONFIRM_ME
+	#usermod -aG sudo "${GNS3_USER}" Should be part of REQUIRED_GROUPS builtin functionality, right?
 
 	log_ok "Welcome console configured"
 }
@@ -1077,7 +1135,7 @@ start_services() {
 	systemctl restart gns3
 	sleep 2
 
-	if systemctl is-active --quiet gns3; then
+	if systemctl is-active --quiet gns3 2>/dev/null; then
 		log_ok "GNS3 service running"
 	else
 		log_warn_sticky "GNS3 service failed to start"
@@ -1086,7 +1144,7 @@ start_services() {
 
 	if [[ "${WITH_DOCKER}" -eq 1 ]]; then
 		enable_and_start docker
-		if systemctl is-active --quiet docker; then
+		if systemctl is-active --quiet docker 2>/dev/null; then
 			log_ok "Docker service running"
 		else
 			log_warn_sticky "Docker service failed to start"
@@ -1095,7 +1153,15 @@ start_services() {
 }
 
 ### Post-install validation ##################################################
-
+# CONFIRM_ME
+# Validation is pretty wimpy ATM
+# Ideas:
+#     Right listening ports per `ss`
+#     Right services are running per 'systemctl'
+#     Right user(s) exist per `cat /etc/passwd`
+#     Right groups memberships per `groups $user`
+#     Right config files have been created
+#     We can curl GNS3 API + Docker + config serve on 8003
 validate() {
 	log_info "Running post-install validation..."
 	local _lan_ip
@@ -1103,12 +1169,12 @@ validate() {
 
 	sleep 3
 
-	if curl -sf --max-time 5 "http://${_lan_ip}:3080/v2/version" &>/dev/null; then
-		log_ok "GNS3 API responding on ${_lan_ip}:3080"
-	elif curl -sf --max-time 5 "http://localhost:3080/v2/version" &>/dev/null; then
-		log_ok "GNS3 API responding on localhost:3080"
+	if curl -sf --max-time 5 "http://${_lan_ip}:${GNS3_PORT}/v2/version" &>/dev/null; then
+		log_ok "GNS3 API responding on ${_lan_ip}:${GNS3_PORT}"
+	elif curl -sf --max-time 5 "http://localhost:${GNS3_PORT}/v2/version" &>/dev/null; then
+		log_ok "GNS3 API responding on localhost:${GNS3_PORT}"
 	else
-		log_warn_sticky "GNS3 API not responding on port 3080"
+		log_warn_sticky "GNS3 API not responding on port ${GNS3_PORT}"
 		log_warn_sticky "  Check: journalctl -u gns3 --no-pager -n 20"
 	fi
 
@@ -1143,12 +1209,9 @@ print_summary() {
 	_public_ip=$(get_public_ip)
 
 	echo ""
-	printf "${GREEN}${BOLD}"
-	echo "  GNS3 Server Install Complete"
-	printf "${NC}"
-	echo "  ##################################"
-	echo ""
-	printf "  Server: http://%s:3080\n" "${_lan_ip}"
+	printf "${GREEN}${BOLD}  GNS3 Server Install Complete${NC}\n"
+	printf "  ##################################\n\n"
+	printf "  Server: http://%s:%s\n" "${_lan_ip}" "${GNS3_PORT}"
 	printf "  Config: %s/gns3_server.conf\n" "${GNS3_CONF_DIR}"
 	printf "  Data:   %s/\n" "${GNS3_HOME}"
 	echo "  Logs:   /var/log/gns3/gns3.log"
@@ -1160,31 +1223,31 @@ print_summary() {
 		echo "  ##################################"
 
 		if [[ "${WITH_WIREGUARD}" -eq 1 ]]; then
-			echo "  WireGuard: ${_public_ip}:51820"
-			echo "    Tunnel:  172.16.254.1:3080"
+			printf "  WireGuard: %s:%s\n" "${_public_ip}" "${WG_PORT}"
+			printf "    Tunnel:  172.16.254.1:%s\n" "${GNS3_PORT}"
 		fi
 
 		if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
-			echo "  OpenVPN:   ${_public_ip}:1194/udp"
-			echo "    Tunnel:  172.16.253.1:3080"
+			printf "  OpenVPN:   %s:%s/udp\n" "${_public_ip}" "${OVPN_PORT}"
+			printf "    Tunnel:  172.16.253.1:%s\n" "${GNS3_PORT}"
 		fi
 		echo ""
 	fi
 
 	# Config server info
-	if [[ -f "${CONFIG_SERVE_DIR}/.serve_slug" ]]; then
+	if [[ -f "${DEPLOY_DIR}/serve_slug" ]]; then
 		local _serve_slug
-		_serve_slug=$(cat "${CONFIG_SERVE_DIR}/.serve_slug")
+		_serve_slug=$(cat "${DEPLOY_DIR}/serve_slug")
 		printf "  Landing page:\n"
-		printf "  http://%s:%s/" "${_lan_ip}" "${CONFIG_SERVE_PORT}"
+		printf "  http://%s:%s/\n" "${_lan_ip}" "${CONFIG_SERVE_PORT}"
 		printf "  ${YELLOW}Expires in %sh${NC}\n\n" "${CONFIG_SERVE_HOURS}"
 	fi
 
 	# Encrypted config download commands
-	if [[ -f "${CONFIG_SERVE_DIR}/.passphrase" ]]; then
+	if [[ -f "${DEPLOY_DIR}/passphrase" ]]; then
 		local _pass _serve_slug
-		_pass=$(cat "${CONFIG_SERVE_DIR}/.passphrase")
-		_serve_slug=$(cat "${CONFIG_SERVE_DIR}/.serve_slug")
+		_pass=$(cat "${DEPLOY_DIR}/passphrase")
+		_serve_slug=$(cat "${DEPLOY_DIR}/serve_slug")
 
 		echo "  Secure config download"
 		echo "  ##################################"
@@ -1194,7 +1257,7 @@ print_summary() {
 	      echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/w | openssl aes-256-cbc -d -pbkdf2 -pass pass:${_pass} -a > wg.conf"
 	      echo ""
 	    fi
-	
+
 	    if [[ "${WITH_OPENVPN}" -eq 1 ]]; then
 	      printf "  ${CYAN}OpenVPN:${NC}\n"
 	      echo "  curl -s http://${_lan_ip}:${CONFIG_SERVE_PORT}/${_serve_slug}/o | openssl aes-256-cbc -d -pbkdf2 -pass pass:${_pass} -a > conf.ovpn"
@@ -1250,7 +1313,13 @@ main() {
 	log_ok "Bootstrap complete"
 
 	set -euo pipefail
-	trap 'log_error "Failed at line $LINENO."' ERR
+	trap 'systemctl start gns3 2>/dev/null || true; log_error "Failed at line $LINENO."' ERR
+
+	# Initialize deploy directory for secrets and state
+	mkdir -p "${DEPLOY_DIR}" && chmod 700 "${DEPLOY_DIR}" && log_ok "Created deploy directory."
+
+	# Log everything to file for post-mortem
+	exec > >(tee -a "${DEPLOY_DIR}/install.log") 2>&1
 
 	preflight_checks
 
