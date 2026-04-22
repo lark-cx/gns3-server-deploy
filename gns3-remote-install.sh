@@ -909,7 +909,7 @@ propagate_groups_to_invoker() {
 }
 
 gns3_repo_present() { 
-  grep -rEq \ "(^(deb|URIs:).*ppa\.launchpadcontent\.net/gns3/${REPOSITORY})" \
+  grep -rEq \ "^.*ppa\.launchpadcontent\.net/gns3/ppa/ubuntu/" \
   /etc/apt/sources.list.d/ 2>/dev/null 
   }
 
