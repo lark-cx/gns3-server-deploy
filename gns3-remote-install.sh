@@ -968,6 +968,8 @@ needs_install() {
 }
 
 install_packages() {
+  apt_retry update -qq
+  
   if [[ "${NO_SYSTEM_UPGRADE}" -eq 0 ]]; then
     log_info "Upgrading system packages..."
     apt_retry upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
@@ -1291,14 +1293,16 @@ probe_http() {
   return 1
 }
 
-# Helper: check if a TCP port is listening
+# Helper: check if a TCP (default) or UDP port is listening
 probe_port_listening() {
-  local _port="$1" _desc="$2"
-  if ss -tlnH 2>/dev/null | grep -q ":${_port} "; then
-    log_ok "${_desc} listening on port ${_port}"
+  local _port="$1" _desc="$2" _proto="${3:-tcp}"
+  local _flag="-tlnH"
+  [[ "${_proto}" == "udp" ]] && _flag="-ulnH"
+  if ss ${_flag} 2>/dev/null | grep -q ":${_port} "; then
+    log_ok "${_desc} listening on ${_proto} port ${_port}"
     return 0
   fi
-  log_warn_sticky "${_desc} not listening on port ${_port}"
+  log_warn_sticky "${_desc} not listening on ${_proto} port ${_port}"
   return 1
 }
 
@@ -1316,8 +1320,8 @@ validate() {
   fi
 
   # Port listening checks
-  probe_port_listening "${GNS3_PORT}" "GNS3 server"
-  probe_port_listening "${CONFIG_SERVE_PORT}" "Config server"
+  probe_port_listening "${GNS3_PORT}" "GNS3 server" || true
+  probe_port_listening "${CONFIG_SERVE_PORT}" "Config server" || true
 
   # Config server landing page
   probe_http "http://${_lan_ip}:${CONFIG_SERVE_PORT}/" "Landing page" || true
@@ -1335,7 +1339,7 @@ validate() {
 
   # VPN tunnel interfaces
   if [[ ${WITH_WIREGUARD} -eq 1 ]]; then
-    probe_port_listening "${WG_PORT}" "WireGuard"
+    probe_port_listening "${WG_PORT}" "WireGuard" udp || true
     if ip link show wg0 &>/dev/null; then
       log_ok "WireGuard interface wg0 is up"
     else
