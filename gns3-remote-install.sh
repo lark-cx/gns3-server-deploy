@@ -1,81 +1,97 @@
 #!/usr/bin/env bash
 
-# ### gns3-remote-install.sh ###################################################
+############################################################
+# Filename   : gns3-remote-install.sh                      #
+# Author     : Shane Sexton                                #
+# Created    : April 18 2026                               #
+# Last edit  : April 22 2026                               #
+# Purpose    : Enhancement to remote-install.sh            #
+# Reference  : GNS3:gns3-server - remote-install.sh        #
+# Depends    : Ubuntu Server 22.04, 24.04, 26.04 LTS       #
+# To do      : Consistency, readability, & structure need  #
+#              improvements at all magnification levels    #
+############################################################
 
-# Install GNS3 on a remote Ubuntu LTS server.
-#
-# Based on the upstream GNS3 remote installer, rewritten to:
-#   - consolidate all apt calls into a single pass
-#   - add preflight validation (commands, ports, kernel modules, CPU virt)
-#   - add WireGuard as a VPN option alongside OpenVPN
-#   - remove IOU support entirely
-#   - ensure the invoking user (SUDO_USER) gets added to all required groups
-#   - improve idempotency, error recovery, and logging
-#
-# Usage: sudo ./gns3-remote-install-redux.sh [OPTIONS]
-#   --with-openvpn            Install and configure OpenVPN
-#   --with-wireguard          Install and configure WireGuard
-#   --with-welcome            Install GNS3-VM welcome.py console UI
-#   --without-kvm             Disable KVM (degrades Qemu performance)
-#   --without-docker          Skip Docker installation
-#   --without-firewall        Skip automatic UFW rule configuration
-#   --without-system-upgrade  Skip apt upgrade
-#   --unsafe-configs          Serve VPN configs unencrypted (not recommended)
-#   --unstable                Use GNS3 unstable PPA
-#   --custom-repository REPO  Use a custom GNS3 PPA name
-#   -h, --help                Show this help
+############################################################
+# PLEASE SEE README FOR FEATURE COMPARISON                 #
+############################################################
 
-### To Me ################################################################
+########################################################################
+# Usage: sudo ./gns3-remote-install-redux.sh [OPTIONS]                 #
+#                                                                      #
+#  --with-openvpn            Install & configure OpenVPN               #
+#  --with-wireguard          Install & configure WireGuard             #
+#  --with-welcome            Install GNS3-VM welcome.py console UI     #
+#  --without-kvm             Disable KVM (hurts Qemu performance)      #
+#  --without-docker          Skip Docker installation                  #
+#  --without-firewall        Skip automatic UFW rule configuration     #
+#  --without-system-upgrade  Skip apt upgrade                          #
+#  --unsafe-configs          Serve VPN configs unencrypted (less safe) #
+#  --unstable                Use GNS3 unstable PPA                     #
+#  --custom-repository REPO  Use custom GNS3 PPA name                  #
+#  -h, --help                Show this help                            #
+########################################################################
 
-# Dear Shane, please review this note to Shane. Love, Shane.
-#
-# Variables:
-#   Global readonly constants:   ROARING_SNEK_CASE
-#   Mutable globals:             ROARING_SNEK_CASE (mut_ROAR?)
-#   Function-local variables:    _snake_case (prefix)
-#   Loop iterators:              _snake_case (also prefix - add suffix  _snek_?)
-#   Variable expansion:          "${VAR}" not "$VAR" - quote and brace
-#
-# Functions:
-#   Names are lowercase_snake_case
-#   Each function starts with a `local` declaration block for all locals
-#   Return 0 - success, 1 - "handled failure", log_fatal - "can't proceed"
-#
-# File writes:
-#   ensure_config for anything that needs specific perms
-#   ensure_directory before writing to a new path
-#   require_file after any external process that should produce a file
-#
-# Logging:
-#   log_info(): what we're about to do (or did, non-critical)
-#   log_ok():   confirmation that something worked
-#   log_warn(): non-fatal issue, not actionable
-#   log_warn_sticky(): non-fatal but user needs to know at summary time
-#   log_error(): something failed but we're continuing
-#   log_fatal(): cannot proceed; exits
-#
-# Services: use enable_and_start() - not systemctl enable/start/restart
-# External resources: use fetch_resource() with ordered fallbacks (local → canonical → mirror)
-#
-# Idempotency:
-#   Every function should be safe to re-run
-#   Key writes: [[ -f key ]] || generate (never overwrite existing keys)
-#   Config writes: always overwrite existing configs
-#   Groups/users: ensure_group / id checks
+########################################################################
+# Conventions                                                          #
+#                                                                      #
+# Variables:                                                           #
+#   Globals:            ROARING_SNEK_CASE                              #
+#   Local and iters:    _snake_case (prefix)                           #
+#   Var expansion:      "${VAR}" (not "$VAR")                          #
+#                                                                      #
+# Functions:                                                           #
+#   Use lowercase_snake_case names                                     #
+#   Start with `local` declaration block for all locals                #
+#   Return 0 - success                                                 #
+#          1 - error; carrying on                                      #
+#          log_fatal - panic                                           #
+#                                                                      #
+# Logic:                                                               #
+#   Avoid shorthand [[ condition ]] &&... use if/else/fi               #
+#                                                                      #
+# File writes:                                                         #
+#   ensure_config()   for anything that needs specific perms           #
+#   ensure_directory() before writing to a new path                    #
+#   require_file()    after any action that should produce a file      #
+#                                                                      #
+# Logging:                                                             #
+#   log_info():        what we're about to do (or did, non-critical)   #
+#   log_ok():          confirmation that something worked              #
+#   log_warn():        non-fatal issue, not actionable                 #
+#   log_warn_sticky(): non-fatal but user informed at summary time     #
+#   log_error():       something failed but we're continuing           #
+#   log_fatal():       cannot proceed; exits                           #
+#                                                                      #
+# Services:                                                            #
+#   enable_and_start() — not systemctl enable/start/restart            #
+#                                                                      #
+# External resources:                                                  #
+#   fetch_resource() with ordered fallbacks (local→canonical→mirror)   #
+#                                                                      #
+# Idempotency:                                                         #
+#   Every function should be safe to re-run                            #
+#   Key writes: [[ -f key ]] || generate (never overwrite keys)        #
+#   Config writes: always overwrite existing configs                   #
+#   Groups/users: ensure_group / id checks                             #
+########################################################################
 
 ### Constants ################################################################
-
+# This repo
 readonly REPO_BASE_URL="https://raw.githubusercontent.com/lark-cx/gns3-server-deploy/refs/heads/main/"
 readonly REPO_LANDING_HTML="template.html"
 readonly REPO_DOCKER_GPG="docker-gpg"
+# Docker
 readonly DOCKER_BASE_URL="https://download.docker.com/linux/ubuntu"
 readonly DOCKER_KEYRING="/etc/apt/keyrings/docker.asc"
+# GNS3 configurations
 readonly GNS3_USER="gns3"
 readonly GNS3_HOME="/opt/gns3"
 readonly GNS3_CONF_DIR="/etc/gns3"
 readonly GNS3_PORT=3080
 readonly GNS3_SERVICE_FILE="/lib/systemd/system/gns3.service"
 readonly GNS3_VENV="/usr/share/gns3/gns3-server"
+# Config deployment server
 readonly CONFIG_SERVE_PORT=8003
 readonly CONFIG_SERVE_DIR="/var/lib/gns3-config-serve"
 readonly CONFIG_SERVE_HOURS=2
@@ -106,6 +122,24 @@ log_fatal() {
   exit 1
 }
 
+
+on_error() {
+  local _line_no="$1"
+  local _cmd="$2"
+  local _exit_code="$3"
+
+  log_error "Failed at line ${_line_no}: ${_cmd} (exit ${_exit_code})"
+
+  # Only try to revive GNS3 if systemd knows about it
+  if systemctl list-unit-files gns3.service >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    sleep 2
+    systemctl restart gns3 >/dev/null 2>&1 || systemctl start gns3 >/dev/null 2>&1 || true
+  fi
+
+  exit "${_exit_code}"
+}
+
 # Testability wrapper — EUID is readonly in bash, so tests override this function
 is_root() { [[ ${EUID} -eq 0 ]]; }
 
@@ -118,7 +152,7 @@ log_warn_sticky() {
 
 ### Mutable arrays (built up by option flags) ##############################─
 REQUIRED_CMDS=(apt apt-add-repository dpkg chown chmod useradd usermod lsmod systemctl ss openssl)
-REQUIRED_PORTS=($GNS3_PORT)
+REQUIRED_PORTS=("${GNS3_PORT}")
 REQUIRED_GROUPS=(kvm ubridge)
 REQUIRED_MODS=(kvm)
 
@@ -157,7 +191,7 @@ REPOSITORY="ppa"
 ### Help ####################################################################─
 
 show_help() {
-cat >&2 <<_EOF_HELP
+  cat >&2 <<_EOF_HELP
 ${BOLD}gns3-remote-install-redux.sh${NC} — GNS3 remote server installer
 
 ${BOLD}Usage:${NC} sudo $0 [OPTIONS]
@@ -187,71 +221,71 @@ eval set -- "${TEMP}"
 
 while true; do
   case "$1" in
-  --with-openvpn)
-    WITH_OPENVPN=1
-    shift
-    ;;
-  --with-wireguard)
-    WITH_WIREGUARD=1
-    shift
-    ;;
-  --with-welcome)
-    WITH_WELCOME=1
-    shift
-    ;;
-  --without-kvm)
-    DISABLE_KVM=1
-    shift
-    ;;
-  --without-docker)
-    WITH_DOCKER=0
-    shift
-    ;;
-  --without-firewall)
-    DISABLE_FIREWALL=1
-    shift
-    ;;
-  --without-system-upgrade)
-    NO_SYSTEM_UPGRADE=1
-    shift
-    ;;
-  --unsafe-configs)
-    UNSAFE_CONFIGS=1
-    shift
-    ;;
-  --legacy-rsa)
-    USE_LEGACY_RSA=1
-    shift
-    ;;
-  --unstable)
-    REPOSITORY="unstable"
-    shift
-    ;;
-  --custom-repository)
-    REPOSITORY="$2"
-    shift 2
-    ;;
-  -h | --help)
-    show_help
-    exit 0
-    ;;
-  --)
-    shift
-    break
-    ;;
-  *) log_fatal "Unknown option: $1" ;;
+    --with-openvpn)
+      WITH_OPENVPN=1
+      shift
+      ;;
+    --with-wireguard)
+      WITH_WIREGUARD=1
+      shift
+      ;;
+    --with-welcome)
+      WITH_WELCOME=1
+      shift
+      ;;
+    --without-kvm)
+      DISABLE_KVM=1
+      shift
+      ;;
+    --without-docker)
+      WITH_DOCKER=0
+      shift
+      ;;
+    --without-firewall)
+      DISABLE_FIREWALL=1
+      shift
+      ;;
+    --without-system-upgrade)
+      NO_SYSTEM_UPGRADE=1
+      shift
+      ;;
+    --unsafe-configs)
+      UNSAFE_CONFIGS=1
+      shift
+      ;;
+    --legacy-rsa)
+      USE_LEGACY_RSA=1
+      shift
+      ;;
+    --unstable)
+      REPOSITORY="unstable"
+      shift
+      ;;
+    --custom-repository)
+      REPOSITORY="$2"
+      shift 2
+      ;;
+    -h | --help)
+      show_help
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *) log_fatal "Unknown option: $1" ;;
   esac
 done
 
 ### Roll up arrays based on flags ##########################################─
 
 if [[ ${WITH_OPENVPN} -eq 1 ]]; then
-  REQUIRED_PORTS+=($OVPN_PORT)
+  REQUIRED_PORTS+=("${OVPN_PORT}")
   REQUIRED_PKGS+=("${PKGS_OPENVPN[@]}")
 fi
 
 if [[ ${WITH_WIREGUARD} -eq 1 ]]; then
-  REQUIRED_PORTS+=($WG_PORT)
+  REQUIRED_PORTS+=("${WG_PORT}")
   REQUIRED_MODS+=(wireguard)
   REQUIRED_PKGS+=("${PKGS_WIREGUARD[@]}")
 fi
@@ -318,7 +352,7 @@ preflight_checks() {
 
   # Ensure time synchronization is active for VPN certificate validity
   if command -v timedatectl &>/dev/null; then
-    timedatectl set-ntp true || log_warn_sticky "Could not enable NTP. Ensure server time is correct for VPN certs."
+    timedatectl set-ntp true || log_warn_sticky "Couldn't start NTP. Ensure accurate time for certs."
   fi
 
   # Load missing kernel modules automatically unless --without-kvm
@@ -365,6 +399,8 @@ preflight_checks() {
 
 ### Helpers ##################################################################
 
+# Retry apt operation 3 times, quietly.
+# Return final lines from apt on failure.
 apt_retry() {
   local _attempts=3 _i _apt_log
   _apt_log=$(mktemp)
@@ -383,10 +419,12 @@ apt_retry() {
   log_fatal "apt failed after ${_attempts} attempts: apt-get $*"
 }
 
+# Groups exists or is created
 ensure_group() {
   getent group "$1" &>/dev/null || groupadd --system "$1"
 }
 
+# Who invoked the script with sudo?
 detect_invoking_user() {
   if [[ -n ${SUDO_USER:-} && ${SUDO_USER} != "root" ]]; then
     echo "${SUDO_USER}"
@@ -432,6 +470,7 @@ encrypted_copy() {
   openssl aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:${_pass}" -a -in "${_src}" -out "${_dst}"
 }
 
+# Enable IPv4 forwarding, if needed
 enable_ip_forwarding() {
   log_info "Enabling IPv4 forwarding..."
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -463,7 +502,7 @@ apply_sysctl_hardening() {
   : >"${_sysctl_file}"
 
   for _key in "${!_sysctls[@]}"; do
-    local _val="${_sysctls[$_key]}"
+    local _val="${_sysctls[${_key}]}"
     echo "${_key}=${_val}" >>"${_sysctl_file}"
     sysctl -w "${_key}=${_val}" >/dev/null 2>&1
   done
@@ -474,17 +513,32 @@ apply_sysctl_hardening() {
 # Safe and quiet service (re)start - with mulligan
 enable_and_start() {
   local _svc="$1"
-  systemctl daemon-reload &>/dev/null
-  systemctl enable "${_svc}" &>/dev/null 2>&1
-  systemctl restart "${_svc}" ||
-    {
-      sleep 3
-      systemctl start "${_svc}"
-    } ||
-    true
+  local _attempt _max=3
+
+  log_info "Enabling and starting service: ${_svc}"
+  systemctl daemon-reload
+  systemctl enable "${_svc}" >/dev/null 2>&1 || true
+
+  for ((_attempt=1; _attempt<=_max; _attempt++)); do
+    if systemctl restart "${_svc}" >/dev/null 2>&1 || systemctl start "${_svc}" >/dev/null 2>&1; then
+      log_ok "Service running: ${_svc}"
+      return 0
+    fi
+
+    if [[ ${_attempt} -lt ${_max} ]]; then
+      log_warn "Service start failed for ${_svc} (attempt ${_attempt}/${_max}); retrying in 1s..."
+      sleep 1
+      systemctl daemon-reload
+    fi
+  done
+
+  log_warn_sticky "Service failed after ${_max} attempts: ${_svc}"
+  log_warn_sticky "  Check: journalctl -u ${_svc} --no-pager -n 30"
+  return 1
 }
 
-# Verify a file exists and is non-empty. Returns 1 and logs sticky warning on failure.
+# Verify a file exists and is non-empty.
+# Returns 1 and logs sticky warning on failure.
 require_file() {
   local _path="$1" _desc="${2:-file}"
   if [[ ! -s ${_path} ]]; then
@@ -508,9 +562,8 @@ ensure_directory() {
   [[ -n ${_mode} ]] && chmod "${_mode}" "${_path}"
 }
 
-# Atomically write a config file with the right perms from the start.
-# Reads content from stdin. Writes to tempfile in target dir, sets perms,
-# then renames — the final path never exists with open perms, even briefly.
+# Atomically write a config file with the right perms from start.
+# Content from stdin -> tempfile in target dir -> perms -> rename
 #
 # Usage:
 #   ensure_config /etc/wireguard/wg0.conf root 600 <<EOF
@@ -543,9 +596,10 @@ ensure_config() {
   log_info "Wrote config: ${_path} (mode ${_mode}, owner ${_owner})"
 }
 
-# Try sequential sources until one succeeds. First arg is destination,
-# remaining args are sources tried in order. Local paths detected by absence
-# of http(s):// prefix. Returns 1 if all sources fail.
+# Try sequential sources until one succeeds. First arg is
+# destination, remaining args are sources, tried in order.
+# Local paths detected by absence of http(s):// prefix.
+# Returns 1 if all sources fail.
 #
 # Usage:
 #   fetch_resource /etc/apt/keyrings/docker.asc \
@@ -578,7 +632,7 @@ fetch_resource() {
 ### Ephemeral config file server ##############################################
 
 setup_config_server() {
-  log_info "Setting up config server (port ${CONFIG_SERVE_PORT}, ${CONFIG_SERVE_HOURS}h TTL)..."
+  log_info "Config server starting (port ${CONFIG_SERVE_PORT}, ${CONFIG_SERVE_HOURS}h TTL)..."
 
   # Stop existing server if running from a previous install
   if systemctl is-active --quiet gns3-config-serve.service 2>/dev/null; then
@@ -619,13 +673,13 @@ setup_config_server() {
   _gns3_ver=$("${_gns3_bin}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
   [[ -z ${_gns3_ver} ]] && _gns3_ver="unknown"
 
-  # ## VPN config files (encrypted by default) ################################
+  # VPN config files (encrypted by default)
   local _conf_passphrase=""
 
   if [[ ${WITH_OPENVPN} -eq 1 || ${WITH_WIREGUARD} -eq 1 ]]; then
     # Fatal if we can't determine public IP for VPN configs
     if [[ ${_public_ip} == "UNKNOWN" ]]; then
-      log_fatal "Could not determine public IP — VPN configs require a reachable address."
+      log_fatal "Couldn't find public IP. VPN configs need a reachable IP."
     fi
 
     if [[ ${UNSAFE_CONFIGS} -eq 0 ]]; then
@@ -677,7 +731,9 @@ setup_config_server() {
     _template_ok=1
   else
     log_error "Failed to obtain template. Using basic fallback UI."
-    echo "<html><body><h1>GNS3 Config Server</h1><p>Template missing. Check server terminal for config details.</p></body></html>" >"${_template_dst}"
+    echo "<html><head><title>Error</title></head>" >"${_template_dst}"
+    echo "<body><h1>GNS3 Config Server</h1><p>" >>"${_template_dst}"
+    echo "Template missing. Check console for details.</p></body></html>" >>"${_template_dst}"
   fi
 
   # Only run sed injections if we got the template (from either local or curl)
@@ -818,30 +874,28 @@ configure_firewall() {
   for _port in "${REQUIRED_PORTS[@]}"; do
     local _status="PERM"
 
-    # VPN ports: allow from anywhere, both TCP and UDP
     case "${_port}" in
-    $OVPN_PORT | $WG_PORT)
-      ufw allow "${_port}"/tcp comment "GNS3 - ${_status} (VPN)" >/dev/null 2>&1
-      ufw allow "${_port}"/udp comment "GNS3 - ${_status} (VPN)" >/dev/null 2>&1
-      continue
-      ;;
-    "${CONFIG_SERVE_PORT}")
-      _status="CLEAR"
-      ufw allow "${_port}"/tcp comment "GNS3 - ${_status} (ephem. webserver)" >/dev/null 2>&1
-      continue
-      ;;
+      "${OVPN_PORT}" | "${WG_PORT}")
+        # VPN ports: open from anywhere, both TCP and UDP
+        ufw allow "${_port}"/tcp comment "GNS3 - ${_status} (VPN)" >/dev/null 2>&1
+        ufw allow "${_port}"/udp comment "GNS3 - ${_status} (VPN)" >/dev/null 2>&1
+        ;;
+      "${CONFIG_SERVE_PORT}")
+        _status="CLEAR"
+        ufw allow "${_port}"/tcp comment "GNS3 - ${_status} (ephem. webserver)" >/dev/null 2>&1
+        ;;
+      *)
+        # Non-VPN ports: scope to SSH source and local subnets
+        if [[ -n "${_remote_ssh_ip}" ]]; then
+          ufw allow from "${_remote_ssh_ip}" to any port "${_port}" proto tcp \
+            comment "GNS3 - ${_status}" >/dev/null 2>&1
+        fi
+        for _subnet in "${_local_subnets[@]}"; do
+          ufw allow from "${_subnet}" to any port "${_port}" proto tcp \
+            comment "GNS3 - ${_status}" >/dev/null 2>&1
+        done
+        ;;
     esac
-
-    # Non-VPN ports: scope to SSH source and local subnets
-    if [[ -n ${_remote_ssh_ip} ]]; then
-      ufw allow from "${_remote_ssh_ip}" to any port "${_port}" proto tcp \
-        comment "GNS3 - ${_status}" >/dev/null 2>&1
-    fi
-
-    for _subnet in "${_local_subnets[@]}"; do
-      ufw allow from "${_subnet}" to any port "${_port}" proto tcp \
-        comment "GNS3 - ${_status}" >/dev/null 2>&1
-    done
   done
 
   # Enable forwarding in ufw if any VPN is configured
@@ -900,7 +954,7 @@ propagate_groups_to_invoker() {
   local _invoker
   _invoker=$(detect_invoking_user)
   if [[ -n ${_invoker} ]]; then
-    log_info "Adding $_invoker to groups: ${REQUIRED_GROUPS[*]}"
+    log_info "Adding ${_invoker} to groups: ${REQUIRED_GROUPS[*]}"
     for _grp in "${REQUIRED_GROUPS[@]}"; do
       usermod -aG "${_grp}" "${_invoker}"
     done
@@ -908,11 +962,13 @@ propagate_groups_to_invoker() {
   fi
 }
 
-gns3_repo_present() { 
-  grep -rEq \ "^.*ppa\.launchpadcontent\.net/gns3/ppa/ubuntu/" \
-  /etc/apt/sources.list.d/ 2>/dev/null 
-  }
+# Is repo present?
+gns3_repo_present() {
+  grep -rEq "^.*ppa.launchpadcontent.net/gns3/ppa/ubuntu/" \
+    /etc/apt/sources.list.d/ 2>/dev/null
+}
 
+# Add gns3 repo (if not already present)
 add_gns3_repository() {
   if gns3_repo_present; then
     log_info "GNS3 PPA already configured"
@@ -923,6 +979,7 @@ add_gns3_repository() {
   log_ok "GNS3 repository added"
 }
 
+# Add Docker repo
 add_docker_repository() {
   if [[ -f ${DOCKER_KEYRING} ]]; then
     log_info "Docker GPG key already present — skipping download"
@@ -961,15 +1018,16 @@ needs_install() {
   for _pkg in "${REQUIRED_PKGS[@]}"; do
     # dpkg-query is faster than apt-cache for this
     if ! dpkg-query -W -f='${Status}' "${_pkg}" 2>/dev/null | grep -q "install ok installed"; then
-      return 0  # at least one package needs install
+      return 0 # at least one package needs install
     fi
   done
-  return 1  # everything installed
+  return 1 # everything installed
 }
 
+# Updates, ugprades, and installs - quietly
 install_packages() {
   apt_retry update -qq
-  
+
   if [[ "${NO_SYSTEM_UPGRADE}" -eq 0 ]]; then
     log_info "Upgrading system packages..."
     apt_retry upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
@@ -1072,39 +1130,57 @@ configure_openvpn() {
   fi
   log_info "Public IP detected: ${_public_ip}"
 
-  local _hostname
-  _hostname=$(hostname)
-
   log_info "Generating OpenVPN keys..."
   ensure_directory "${OVPN_CONF_DIR}" root 755
 
+  # If using *RSA*
   if [[ ${USE_LEGACY_RSA} -eq 1 ]]; then
     log_info "Using legacy RSA crypto (DH params may take a minute)..."
-    [[ -f "${OVPN_CONF_DIR}/dh.pem" ]] || openssl dhparam -quiet 2048 | ensure_config "${OVPN_CONF_DIR}/dh.pem" root 600
+    if [[ -f "${OVPN_CONF_DIR}/dh.pem" ]]; then
+      log_info "Already have DH params. Skipping."
+    else
+      openssl dhparam -quiet 2048 | ensure_config "${OVPN_CONF_DIR}/dh.pem" root 600
+    fi
     require_file "${OVPN_CONF_DIR}/dh.pem" "OpenVPN DH params" || log_fatal "DH param generation failed"
 
-    [[ -f "${OVPN_CONF_DIR}/key.pem" ]] || openssl genrsa 2048 | ensure_config "${OVPN_CONF_DIR}/key.pem" root 600
+    if [[ -f "${OVPN_CONF_DIR}/key.pem" ]]; then
+      log_info "Already have OpenVPN key. Skipping."
+    else
+      openssl genrsa 2048 | ensure_config "${OVPN_CONF_DIR}/key.pem" root 600
+    fi
+
+  # If using *ECC*
   else
     log_info "Using elliptic curve crypto (P-384)..."
-    [[ -f "${OVPN_CONF_DIR}/key.pem" ]] || openssl ecparam -name secp384r1 -genkey -noout | ensure_config "${OVPN_CONF_DIR}/key.pem" root 600
+    if [[ -f "${OVPN_CONF_DIR}/key.pem" ]]; then
+      log_info "Already have OpenVPN key. Skipping."
+    else
+      openssl ecparam -name secp384r1 -genkey -noout | ensure_config "${OVPN_CONF_DIR}/key.pem" root 600
+    fi
+
   fi
   require_file "${OVPN_CONF_DIR}/key.pem" "OpenVPN private key" || log_fatal "Key generation failed"
-  chmod 600 "${OVPN_CONF_DIR}/key.pem"
 
-  [[ -f "${OVPN_CONF_DIR}/csr.pem" ]] || openssl req -new -key "${OVPN_CONF_DIR}/key.pem" \
-    -out "${OVPN_CONF_DIR}/csr.pem" -subj /CN=OpenVPN/ 2>/dev/null
-  require_file "${OVPN_CONF_DIR}/csr.pem" "OpenVPN CSR" || log_fatal "CSR generation failed"
+ if [[ -f "${OVPN_CONF_DIR}/csr.pem" ]]; then
+   log_info "csr.pem already present."
+ else
+  openssl req -new -key "${OVPN_CONF_DIR}/key.pem" -out "${OVPN_CONF_DIR}/csr.pem" \
+    -subj /CN=OpenVPN/ 2>/dev/null
+ fi
+ require_file "${OVPN_CONF_DIR}/csr.pem" "OpenVPN CSR" || log_fatal "CSR generation failed"
 
-  [[ -f "${OVPN_CONF_DIR}/cert.pem" ]] || openssl x509 -req -in "${OVPN_CONF_DIR}/csr.pem" \
-    -out "${OVPN_CONF_DIR}/cert.pem" -signkey "${OVPN_CONF_DIR}/key.pem" -days 3650 &>/dev/null
+  if [[ -f "${OVPN_CONF_DIR}/cert.pem" ]]; then
+    log_info "cert.pem already present."
+  else
+    openssl x509 -req -in "${OVPN_CONF_DIR}/csr.pem" -out "${OVPN_CONF_DIR}/cert.pem" \
+      -signkey "${OVPN_CONF_DIR}/key.pem" -days 3650 &>/dev/null
+  fi
   require_file "${OVPN_CONF_DIR}/cert.pem" "OpenVPN certificate" || log_fatal "Certificate signing failed"
 
   local _dh_client_block=""
   local _dh_server_line="dh none"
   if [[ ${USE_LEGACY_RSA} -eq 1 ]]; then
-    _dh_client_block="<dh>
-$(cat "${OVPN_CONF_DIR}/dh.pem")
-</dh>"
+    _dh_client_block="<dh>$(cat "${OVPN_CONF_DIR}/dh.pem")</dh>"
     _dh_server_line="dh dh.pem"
   fi
 
@@ -1229,10 +1305,10 @@ gns3   ALL = (ALL) NOPASSWD: /usr/bin/apt-get
 gns3   ALL = (ALL) NOPASSWD: /usr/sbin/reboot
 _EOF
 
-if ! visudo -cf /etc/sudoers.d/gns3 &>/dev/null; then
-  log_warn_sticky "sudoers fragment failed syntax check — removing"
-  rm -f /etc/sudoers.d/gns3
-fi
+  if ! visudo -cf /etc/sudoers.d/gns3 &>/dev/null; then
+    log_warn_sticky "sudoers fragment failed syntax check — removing"
+    rm -f /etc/sudoers.d/gns3
+  fi
 
   curl -fsSL https://raw.githubusercontent.com/GNS3/gns3-server/master/scripts/welcome.py \
     -o /usr/local/bin/welcome.py
@@ -1402,7 +1478,7 @@ validate() {
   local _gns3_bin="/usr/bin/gns3server"
   [[ -x "${GNS3_VENV}/bin/gns3server" ]] && _gns3_bin="${GNS3_VENV}/bin/gns3server"
   if "${_gns3_bin}" --version &>/dev/null; then
-    log_ok "gns3server binary: $(${_gns3_bin} --version 2>&1 | head -1)"
+    log_ok "gns3server binary: $("${_gns3_bin}" --version 2>&1 | head -1)"
   else
     log_warn_sticky "gns3server binary cannot execute — possible Python venv issue"
     log_warn_sticky "  Binary: ${_gns3_bin}"
@@ -1510,9 +1586,9 @@ print_summary() {
   fi
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
+##############################################################################
 # MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
+##############################################################################
 
 main() {
   export DEBIAN_FRONTEND="noninteractive"
@@ -1528,14 +1604,12 @@ main() {
   fi
 
   log_info "Bootstrapping essential packages..."
-  apt-get update -qq >/dev/null 2>&1 &&
-    log_info "Update done"
-  apt-get install -y -qq curl software-properties-common >/dev/null 2>&1 &&
-    log_info "Installed curl"
-  log_ok "Bootstrap complete"
+  apt-get update -qq >/dev/null 2>&1 && log_info "Update done"
+  apt-get install -y -qq curl software-properties-common >/dev/null 2>&1 && log_ok "Bootstrap complete"
 
-  set -euo pipefail
-  trap 'systemctl start gns3 2>/dev/null || true; log_error "Failed at line $LINENO."' ERR
+  set -Eeuo pipefail
+
+  trap 'on_error "${LINENO}" "${BASH_COMMAND}" "$?"' ERR
   trap 'log_warn "Interrupted by user."; exit 130' INT TERM
 
   # Initialize deploy directory for secrets and state
@@ -1547,12 +1621,12 @@ main() {
 
   preflight_checks
 
-  readonly OS_CODENAME="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+  readonly OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME}}"
 
   # # Phase 1: Repositories ##################################################
 
   add_gns3_repository
-  if [[ ${WITH_DOCKER} -eq 1 ]]; then add_docker_repository; fi
+  if [[ "${WITH_DOCKER}" -eq 1 ]]; then add_docker_repository; fi
 
   # # Phase 2: Packages (single apt pass) ####################################
 
