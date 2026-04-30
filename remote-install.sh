@@ -351,13 +351,10 @@ preflight_checks() {
 
   # Detect reconfigure: our config marker + gns3 service running
   # # shellcheck disable=SC2310
-  if file_exists "${_GNS3_CONF_DIR_}/gns3_server.conf"; then
-    if grep -q "${_DEPLOY_MARKER_}" "${_GNS3_CONF_DIR_}/gns3_server.conf" 2>/dev/null &&
-      systemctl is-active --quiet gns3 2>/dev/null; then
-      log_info "Existing installation detected — running in reconfigure mode"
-      systemctl stop gns3
-      systemctl stop gns3-config-serve.service 2>/dev/null || true
-    fi
+  if dir_exists "${_DEPLOY_DIR_}"; then
+    log_info "Existing installation detected — running in reconfigure mode"
+    systemctl stop gns3 2>/dev/null || true
+    systemctl stop gns3-config-serve.service 2>/dev/null || true
   fi
 
   local -a _busy_ports=()
