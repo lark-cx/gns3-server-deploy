@@ -1110,7 +1110,7 @@ install_gns3_service() {
   fi
 
   fetch_file "${_TEMPLATE_GNS3_SERVICE_}" | render_template \
-    "GNS3_USER=${_GNS3_USER_}" \
+    "_GNS3_USER_=${_GNS3_USER_}" \
     "_gns3_bin=${_gns3_bin}" |
     ensure_config "${_GNS3_SERVICE_FILE_}" root 644
 
