@@ -1,8 +1,8 @@
 [Unit]
-Description=Stop GNS3 config server after ${CONFIG_SERVE_HOURS} hours
+Description=Stop GNS3 config server after ${_CONFIG_SERVE_HOURS_} hours
 
 [Timer]
-OnActiveSec=${CONFIG_SERVE_HOURS}h
+OnActiveSec=${_CONFIG_SERVE_HOURS_}h
 AccuracySec=1min
 Unit=gns3-config-serve-stop.service
 
