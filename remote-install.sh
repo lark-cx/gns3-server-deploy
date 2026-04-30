@@ -815,7 +815,7 @@ setup_config_server() {
     "UNSAFE_CONFIGS=${UNSAFE_CONFIGS}" \
     "SERVE_SLUG=${_serve_slug}" \
     "SERVE_HOURS=${_CONFIG_SERVE_HOURS_}" \
-    "SERVE_PORT=${_CONFIG_SERVE_PORT_}" \
+    "_SERVE_PORT_=${_CONFIG_SERVE_PORT_}" \
     "WARNINGS_JSON=${_warnings_json}" \
     "_OVPN_PORT_=${_OVPN_PORT_}" \
     "_WG_PORT_=${_WG_PORT_}" | ensure_config "${_template_dst}" root 644; then
