@@ -1,6 +1,6 @@
 #!/bin/sh
 if systemctl is-active --quiet gns3-config-serve.service 2>/dev/null; then
   echo ""
-  echo "  GNS3 config: http://${_lan_ip}:${CONFIG_SERVE_PORT}/"
+  echo "  GNS3 config: http://${_lan_ip}:${_CONFIG_SERVE_PORT_}/"
   echo "  (auto-expires — download configs now)"
 fi
