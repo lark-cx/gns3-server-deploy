@@ -1,11 +1,11 @@
 ${DEPLOY_MARKER}
 [Server]
 host = ${_listen_host}
-port = ${GNS3_PORT}
-images_path = ${GNS3_HOME}/images
-projects_path = ${GNS3_HOME}/projects
-appliances_path = ${GNS3_HOME}/appliances
-configs_path = ${GNS3_HOME}/configs
+port = ${_GNS3_PORT_}
+images_path = ${_GNS3_HOME_}/images
+projects_path = ${_GNS3_HOME_}/projects
+appliances_path = ${_GNS3_HOME_}/appliances
+configs_path = ${_GNS3_HOME_}/configs
 report_errors = True
 
 [Qemu]
