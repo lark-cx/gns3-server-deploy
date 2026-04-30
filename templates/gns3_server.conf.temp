@@ -1,4 +1,4 @@
-${DEPLOY_MARKER}
+${_DEPLOY_MARKER_}
 [Server]
 host = ${_listen_host}
 port = ${_GNS3_PORT_}
