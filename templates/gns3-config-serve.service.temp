@@ -4,8 +4,8 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${CONFIG_SERVE_DIR}
-ExecStart=/usr/bin/python3 -m http.server ${CONFIG_SERVE_PORT} --bind 0.0.0.0
+WorkingDirectory=${_CONFIG_SERVE_DIR_}
+ExecStart=/usr/bin/python3 -m http.server ${_CONFIG_SERVE_PORT_} --bind 0.0.0.0
 Restart=no
 
 [Install]
