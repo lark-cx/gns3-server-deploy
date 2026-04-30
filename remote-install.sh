@@ -1090,8 +1090,8 @@ configure_gns3() {
   fetch_file "${_TEMPLATE_GNS3_SERVER_CONF_}" | render_template \
     "_DEPLOY_MARKER_=${_DEPLOY_MARKER_}" \
     "_listen_host=${_listen_host}" \
-    "GNS3_PORT=${_GNS3_PORT_}" \
-    "GNS3_HOME=${_GNS3_HOME_}" \
+    "_GNS3_PORT_=${_GNS3_PORT_}" \
+    "_GNS3_HOME_=${_GNS3_HOME_}" \
     "_hw_accel=${_hw_accel}" |
     ensure_config "${_GNS3_CONF_DIR_}/gns3_server.conf" "${_GNS3_USER_}" 600
 
