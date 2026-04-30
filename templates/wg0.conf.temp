@@ -1,6 +1,6 @@
 [Interface]
 Address = 172.16.254.1/24
-ListenPort = ${WG_PORT}
+ListenPort = ${_WG_PORT_}
 PrivateKey = ${_server_privkey}
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${_default_iface} -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${_default_iface} -j MASQUERADE
