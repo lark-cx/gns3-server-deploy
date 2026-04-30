@@ -1,0 +1,114 @@
+<!doctype html>
+<!-- Note: cozy by design. Keeping "small but decipherable". -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GNS3 Server</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Fira+Sans+Extra+Condensed:wght@200&family=Fira+Mono&display=swap");
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { background: #070600; color: #e0e0e0; font-family: "Fira Sans Extra Condensed", sans-serif; font-size: 24px;
+      line-height: 1.8; padding: 2rem; max-width: 950px; margin: 0 auto; }
+      h1 { font-family: "Bebas Neue", sans-serif; color: #ff1053; font-size: 4rem; letter-spacing: 2px; margin-bottom: 0.5rem; }
+      h2 { font-family: "Bebas Neue", sans-serif; color: #ff1053; font-size: 2rem; letter-spacing: 1px; margin: 2rem 0 0.5rem; border-bottom: 1px solid #333; padding-bottom: 0.3rem; }
+      a { color: #ff1053; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      code, .mono { font-family: "Fira Mono", monospace; font-size: 1.4rem; padding: 2px 6px; border-radius: 3px; }
+      pre { background: #1a1a1a; padding: 1.2rem; border-radius: 4px; overflow-x: auto; font-family: "Fira Mono", monospace; font-size: 0.85em; margin: 0.5rem 0; white-space: pre-wrap; word-break: break-all; }
+      .card { background: #111; border: 1px solid #222; padding: 1rem; margin: 0.5rem 0; border-radius: 4px; }
+      .warn { border-left: 3px solid #ff1053; }
+      .dl { display: inline-block; background: #ff1053; color: #070600; padding: 0.4rem 1rem; font-weight: 700; margin: 0.3rem 0.3rem 0.3rem 0; border-radius: 3px; font-size: 0.9rem; }
+      .dl:hover { background: #cc0d42; text-decoration: none; }
+      .muted { color: #666; font-size: 1.1rem; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+      @media (max-width: 720px) { .grid { grid-template-columns: 1fr; }   }
+    </style>
+  </head>
+  <body>
+    <h1>GNS3 SERVER</h1>
+
+    <div id="app"></div>
+    <script>
+      // Data injected by gns3-remote.sh
+      const D = {
+      lan_ip: "{{LAN_IP}}", public_ip: "{{PUBLIC_IP}}", hostname: "{{HOSTNAME}}", gns3_version: "{{GNS3_VERSION}}",
+      with_openvpn: {{WITH_OPENVPN}}, with_wireguard: {{WITH_WIREGUARD}}, with_docker: {{WITH_DOCKER}},
+      disable_kvm: {{DISABLE_KVM}}, unsafe_configs: {{UNSAFE_CONFIGS}},
+      serve_slug: "{{SERVE_SLUG}}", serve_hours: {{SERVE_HOURS}}, serve_port: {{SERVE_PORT}},
+      gns3_port: {{GNS3_PORT}}, ovpn_port: {{OVPN_PORT}}, wg_port: {{WG_PORT}},
+      warnings: {{WARNINGS_JSON}}
+      };
+
+      const $ = document.getElementById('app');
+      let h = '';
+
+      h += '<h2>YOUR SERVER</h2>';h += '<div class="card">';
+      h += `<p><strong>GNS3:</strong> <a href="http://${D.lan_ip}:${D.gns3_port}">http://${D.lan_ip}:${D.gns3_port}</a></p>`;
+      h += `<p><strong>Version:</strong> <code>${D.gns3_version}</code></p>`;
+      h += `<p><strong>Host:</strong> ${D.hostname}</p>`;
+      h += `<p><strong>Docker:</strong> ${D.with_docker ? 'Yes' : 'No'}</p>`;
+      h += `<p><strong>KVM:</strong> ${D.disable_kvm ? '<span style="color:#FF1053">Disabled</span>' : 'Enabled'}</p>`;
+      h += '</div>';
+
+      if (D.with_wireguard || D.with_openvpn) {
+      h += '<h2>VPN</h2><div class="card">';
+      const ext = D.unsafe_configs ? '' : '.enc';
+
+      if (D.with_wireguard) {
+      h += `<p><strong>WireGuard:</strong> <code>${D.public_ip}:${D.wg_port}</code></p>`;
+      h += `<p><strong>Tunnel:</strong> <code>172.16.254.1:${D.gns3_port}</code></p>`;
+      h += `<a class="dl" href="${D.serve_slug}/w">Download WireGuard Config${ext ? ' (encrypted)' : ''}</a> `;
+      }
+
+      if (D.with_openvpn) {
+      h += `<p><strong>OpenVPN:</strong> <code>${D.public_ip}:${D.ovpn_port}/udp</code></p>`;
+      h += `<p><strong>Tunnel:</strong> <code>172.16.253.1:${D.gns3_port}</code></p>`;
+      h += `<a class="dl" href="${D.serve_slug}/o">Download OpenVPN Config${ext ? ' (encrypted)' : ''}</a> `;
+      }
+
+      if (!D.unsafe_configs) {
+      h += '<p class="muted" style="margin-top:0.5rem">Configs encrypted. Passphrase on server terminal.</p>';
+      }
+      h += '<p class="muted">Port forwarding required on your router.</p></div>';
+      }
+
+      // Dynamic  Download Links based on Semantic Version
+      const dl_win = D.gns3_version !== "unknown"
+      ? `https://github.com/GNS3/gns3-gui/releases/download/v${D.gns3_version}/GNS3-${D.gns3_version}-all-in-one.exe`
+      : `https://github.com/GNS3/gns3-gui/releases/latest`;
+      const dl_mac = D.gns3_version !== "unknown"
+      ? `https://github.com/GNS3/gns3-gui/releases/download/v${D.gns3_version}/GNS3-${D.gns3_version}.dmg`
+      : `https://github.com/GNS3/gns3-gui/releases/latest`;
+
+      h += '<h2>GNS3 CLIENT</h2>';
+      h += '<div class="grid">';
+      h += '<div class="card"><strong>Windows</strong><br>';
+      h += `<a class="dl" href="${dl_win}">GNS3 Client ${D.gns3_version !== "unknown" ? '(v' + D.gns3_version + ')' : ''}</a>`;
+      h += '<br><a class="dl" href="https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html">PuTTY</a></div>';
+      h += '<div class="card"><strong>macOS</strong><br>';
+      h += `<a class="dl" href="${dl_mac}">GNS3 Client ${D.gns3_version !== "unknown" ? '(v' + D.gns3_version + ')' : ''}</a>`;
+      h += '<br><a class="dl" href="https://iterm2.com">iTerm2</a></div>';
+      h += '<div class="card"><strong>Linux</strong><br>';
+      h += '<a class="dl" href="https://github.com/GNS3/gns3-gui/releases/latest">GNS3 Client</a>';
+      h += '<br><code>sudo apt install gns3-gui</code></div></div>';
+
+      h += '<h2>RESOURCES</h2>'; h += '<div class="card">';
+      h += '<p><a href="https://gns3.com/marketplace/appliances">GNS3 Appliance Marketplace</a></p>';
+      h += '<p><a href="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso">VirtIO Windows Drivers</a></p>';
+      h += '<p><a href="https://docs.gns3.com">GNS3 Documentation</a></p>';
+      h += '<p><a href="https://lark.cx">lark.cx tutorials</a></p></div>';
+
+      if (D.warnings && D.warnings.length > 0) {
+      h += '<h2>WARNINGS</h2>';
+      D.warnings.forEach(w => { h += `<div class="card warn"><code>${w}</code></div>`; });
+      }
+
+      h += '<h2>THIS PAGE</h2>';
+      h += '<div class="card">';
+      h += `<p>Auto-expires in <span style="color:#FF1053;font-family:'Fira Mono',monospace">${D.serve_hours}h</span></p>`;
+      h += '<p class="muted">Download configs before this page disappears.</p></div>';
+      $.innerHTML = h;
+    </script>
+  </body>
+</html>

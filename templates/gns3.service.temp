@@ -1,0 +1,21 @@
+[Unit]
+Description=GNS3 server
+After=network-online.target
+Wants=network-online.target
+Conflicts=shutdown.target
+
+[Service]
+User=${GNS3_USER}
+Group=${GNS3_USER}
+PermissionsStartOnly=true
+EnvironmentFile=/etc/environment
+ExecStartPre=/bin/mkdir -p /var/log/gns3 /var/run/gns3
+ExecStartPre=/bin/chown -R ${GNS3_USER}:${GNS3_USER} /var/log/gns3 /var/run/gns3
+ExecStart=${_gns3_bin} --log /var/log/gns3/gns3.log
+ExecReload=/bin/kill -s HUP \$MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=16384
+
+[Install]
+WantedBy=multi-user.target

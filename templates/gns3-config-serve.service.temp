@@ -1,0 +1,12 @@
+[Unit]
+Description=GNS3 ephemeral config server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${CONFIG_SERVE_DIR}
+ExecStart=/usr/bin/python3 -m http.server ${CONFIG_SERVE_PORT} --bind 0.0.0.0
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

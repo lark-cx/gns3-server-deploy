@@ -1,0 +1,13 @@
+${DEPLOY_MARKER}
+[Server]
+host = ${_listen_host}
+port = ${GNS3_PORT}
+images_path = ${GNS3_HOME}/images
+projects_path = ${GNS3_HOME}/projects
+appliances_path = ${GNS3_HOME}/appliances
+configs_path = ${GNS3_HOME}/configs
+report_errors = True
+
+[Qemu]
+enable_hardware_acceleration = ${_hw_accel}
+require_hardware_acceleration = ${_hw_accel}

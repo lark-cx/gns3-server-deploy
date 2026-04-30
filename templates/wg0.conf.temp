@@ -1,0 +1,11 @@
+[Interface]
+Address = 172.16.254.1/24
+ListenPort = ${WG_PORT}
+PrivateKey = ${_server_privkey}
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${_default_iface} -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${_default_iface} -j MASQUERADE
+
+[Peer]
+# client1
+PublicKey = ${_client_pubkey}
+AllowedIPs = 172.16.254.2/32

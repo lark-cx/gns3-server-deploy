@@ -1,0 +1,10 @@
+[Interface]
+Address = 172.16.254.2/24
+PrivateKey = ${_client_privkey}
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = ${_server_pubkey}
+Endpoint = ${_public_ip}:${WG_PORT}
+AllowedIPs = 172.16.253.0/24, 172.16.254.0/24
+PersistentKeepalive = 25

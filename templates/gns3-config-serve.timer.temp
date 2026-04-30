@@ -1,0 +1,10 @@
+[Unit]
+Description=Stop GNS3 config server after ${CONFIG_SERVE_HOURS} hours
+
+[Timer]
+OnActiveSec=${CONFIG_SERVE_HOURS}h
+AccuracySec=1min
+Unit=gns3-config-serve-stop.service
+
+[Install]
+WantedBy=timers.target
